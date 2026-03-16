@@ -3,25 +3,25 @@
 """
 train.py
 ========
-Main training script for ExploRLLM on Sagittarius SGR532.
+ExploRLLM 在 Sagittarius SGR532 上的主训练脚本。
 
-Usage examples:
-    # Single run with ε=0.2
+用法示例：
+    # 单次运行 ε=0.2
     python train.py --epsilon 0.2 --seed 0
 
-    # Ablation: sweep ε ∈ {0, 0.2, 0.5}
+    # Ablation：遍历 ε ∈ {0, 0.2, 0.5}
     python train.py --ablation --seeds 0 1 2
 
-    # With DeepSeek
+    # 使用 DeepSeek
     python train.py --epsilon 0.2 --model deepseek-v3 --api-key sk-xxx
 
-    # Without LLM (pure SAC baseline)
+    # 不用 LLM（纯 SAC 基线）
     python train.py --epsilon 0.0
 
-Environment variables (alternative to CLI args):
-    LLM_API_KEY    : your API key
-    LLM_BASE_URL   : custom API endpoint
-    LLM_MODEL      : model name
+环境变量（可替代命令行参数）：
+    LLM_API_KEY    : API key
+    LLM_BASE_URL   : 自定义 API 地址
+    LLM_MODEL      : 模型名
 """
 
 import os
@@ -35,17 +35,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# Add project root to path
+# 将项目根目录加入路径
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
+# ── 命令行参数解析 ────────────────────────────────────────────────────────────
 
 def get_args():
     p = argparse.ArgumentParser(description="ExploRLLM training on Sagittarius")
 
-    # Training config
+    # 训练配置
     p.add_argument("--epsilon",      type=float, default=0.2,
                    help="LLM exploration probability (0=pure SAC)")
     p.add_argument("--total-steps",  type=int, default=50_000,
@@ -57,7 +57,7 @@ def get_args():
                    choices=["short_horizon", "long_horizon"])
     p.add_argument("--max-episode-steps", type=int, default=10)
 
-    # SAC hyperparameters
+    # SAC 超参数
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--buffer-size",   type=int,   default=50_000)
     p.add_argument("--batch-size",    type=int,   default=256)
@@ -67,7 +67,7 @@ def get_args():
     p.add_argument("--gradient-steps",type=int,   default=1)
     p.add_argument("--learning-starts",type=int,  default=1000)
 
-    # LLM config
+    # LLM 配置
     p.add_argument("--model",        type=str, default="deepseek-v3",
                    help="LLM model name or preset key")
     p.add_argument("--api-key",      type=str,
@@ -78,14 +78,14 @@ def get_args():
     p.add_argument("--n-candidates", type=int, default=3,
                    help="Number of low-level code candidates per object")
 
-    # Ablation
+    # Ablation 实验
     p.add_argument("--ablation",     action="store_true",
                    help="Run ablation sweep over ε ∈ {0, 0.2, 0.5}")
     p.add_argument("--seeds",        type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--epsilons",     type=float, nargs="+",
                    default=[0.0, 0.2, 0.5])
 
-    # Output
+    # 输出
     p.add_argument("--log-dir",      type=str, default="./logs")
     p.add_argument("--save-freq",    type=int, default=5000,
                    help="Save checkpoint every N steps")
@@ -94,7 +94,7 @@ def get_args():
     p.add_argument("--eval-episodes",type=int, default=10,
                    help="Episodes per evaluation")
 
-    # Misc
+    # 其他
     p.add_argument("--device",       type=str, default="auto",
                    help="'auto', 'cuda', or 'cpu'")
     p.add_argument("--verbose",      type=int, default=1)
@@ -102,17 +102,17 @@ def get_args():
     return p.parse_args()
 
 
-# ── Logging & callbacks ───────────────────────────────────────────────────────
+# ── 日志与回调 ───────────────────────────────────────────────────────────────
 
 class TrainingLogger:
-    """Minimal training logger that saves episode rewards to JSON."""
+    """简单训练日志：将 episode 奖励等写入 JSON。"""
 
     def __init__(self, log_path: Path):
         self.log_path = log_path
         self.data = {
             "config": {},
-            "episode_rewards": [],   # list of (step, reward)
-            "eval_results":    [],   # list of eval dicts
+            "episode_rewards": [],   # (step, reward) 列表
+            "eval_results":    [],   # 评估结果字典列表
         }
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -131,12 +131,12 @@ class TrainingLogger:
             json.dump(self.data, f, indent=2)
 
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+# ── 策略评估 ──────────────────────────────────────────────────────────────────
 
 def evaluate_policy(model, env, n_episodes: int = 10) -> dict:
     """
-    Run n_episodes with the current policy (no LLM exploration).
-    Returns success rate, mean reward, low-level error rate.
+    用当前策略跑 n_episodes（不启用 LLM 探索）。
+    返回成功率、平均奖励、低层错误率。
     """
     successes      = 0
     total_rewards  = []
@@ -158,7 +158,7 @@ def evaluate_policy(model, env, n_episodes: int = 10) -> dict:
                 motion_errors += 1
 
         total_rewards.append(ep_reward)
-        if done:  # terminated = task success
+        if done:  # terminated 表示任务成功
             successes += 1
 
     return {
@@ -170,10 +170,10 @@ def evaluate_policy(model, env, n_episodes: int = 10) -> dict:
     }
 
 
-# ── Single training run ───────────────────────────────────────────────────────
+# ── 单次训练流程 ──────────────────────────────────────────────────────────────
 
 def train_single(args, epsilon: float, seed: int, run_name: str):
-    """Run one training experiment."""
+    """执行一次训练实验。"""
     import rospy
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC, make_sac_kwargs
@@ -185,7 +185,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     print(f"  Training: {run_name}  (ε={epsilon}, seed={seed})")
     print(f"{'='*60}\n")
 
-    # ── Setup directories ──────────────────────────────────────────────────
+    # ── 创建目录 ─────────────────────────────────────────────────────────────
     log_dir  = Path(args.log_dir) / run_name
     ckpt_dir = log_dir / "checkpoints"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -196,15 +196,15 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     logger.data["config"]["epsilon"] = epsilon
     logger.data["config"]["seed"]    = seed
 
-    # ── Random seeds ──────────────────────────────────────────────────────
+    # ── 随机种子 ────────────────────────────────────────────────────────────
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # ── ROS init (done once per process) ──────────────────────────────────
+    # ── ROS 初始化（每进程一次）──────────────────────────────────────────────
     if not rospy.core.is_initialized():
         rospy.init_node("explorllm_train", anonymous=True)
 
-    # ── Create environments ────────────────────────────────────────────────
+    # ── 创建环境 ────────────────────────────────────────────────────────────
     train_env = Monitor(
         SagittariusPickPlaceEnv(
             task=args.task,
@@ -216,12 +216,12 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         SagittariusPickPlaceEnv(
             task=args.task,
             max_steps=args.max_episode_steps,
-            noise_sigma=0.0,   # eval with less noise for cleaner metrics
+            noise_sigma=0.0,   # 评估时少噪声以便指标更干净
         ),
         filename=str(log_dir / "eval_monitor.csv"),
     )
 
-    # ── LLM policy ────────────────────────────────────────────────────────
+    # ── LLM 探索策略 ───────────────────────────────────────────────────────
     llm_policy = None
     if epsilon > 0.0 and args.api_key:
         from llm.llm_policy import LLMExplorationPolicy
@@ -237,14 +237,14 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         print(f"[Train] WARNING: ε={epsilon} but no API key provided. "
               f"Running as pure SAC (ε=0).")
 
-    # ── Device ────────────────────────────────────────────────────────────
+    # ── 设备 ───────────────────────────────────────────────────────────────
     device = "auto"
     if args.device == "cpu":
         device = "cpu"
     elif args.device == "cuda" and torch.cuda.is_available():
         device = "cuda"
 
-    # ── Build SAC model ────────────────────────────────────────────────────
+    # ── 构建 SAC 模型 ───────────────────────────────────────────────────────
     policy_kwargs = make_sac_kwargs(features_dim=128)
 
     model = ExploRLLMSAC(
@@ -252,7 +252,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         env=train_env,
         llm_policy=llm_policy,
         warmup_steps=args.warmup_steps,
-        # SAC hyperparameters
+        # SAC 超参数
         learning_rate=args.learning_rate,
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
@@ -271,10 +271,10 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     print(f"[Train] Model parameters: "
           f"{sum(p.numel() for p in model.policy.parameters()):,}")
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
+    # ── 回调 ───────────────────────────────────────────────────────────────
 
     class EpisodeLogCallback(BaseCallback):
-        """Log episode reward at end of each episode."""
+        """在每个 episode 结束时记录 episode 奖励。"""
         def __init__(self, _logger: TrainingLogger):
             super().__init__()
             self._ep_logger = _logger
@@ -296,7 +296,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
             self._ep_logger.save()
 
     class EvalLogCallback(BaseCallback):
-        """Periodic evaluation + logging."""
+        """定期评估并写入日志。"""
         def __init__(self, _logger, eval_env, freq, n_ep):
             super().__init__()
             self._ep_logger  = _logger
@@ -330,7 +330,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         checkpoint_cb,
     ]
 
-    # ── Train ─────────────────────────────────────────────────────────────
+    # ── 开始训练 ───────────────────────────────────────────────────────────
     print(f"[Train] Starting training for {args.total_steps} steps...")
     t0 = time.time()
 
@@ -346,12 +346,12 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     elapsed = time.time() - t0
     print(f"\n[Train] Done. Elapsed: {elapsed/3600:.1f}h")
 
-    # ── Final save ────────────────────────────────────────────────────────
+    # ── 最终保存 ───────────────────────────────────────────────────────────
     final_path = str(log_dir / "final_model")
     model.save(final_path)
     print(f"[Train] Model saved to {final_path}.zip")
 
-    # Final eval
+    # 最终评估
     print("[Train] Running final evaluation...")
     final_results = evaluate_policy(model, eval_env, args.eval_episodes * 2)
     logger.log_eval(args.total_steps, {**final_results, "final": True})
@@ -359,17 +359,17 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     print(f"[Train] Final: success={final_results['success_rate']:.2%}, "
           f"reward={final_results['mean_reward']:.3f}")
 
-    # Cleanup
+    # 清理
     train_env.close()
     eval_env.close()
 
     return final_results
 
 
-# ── Ablation sweep ────────────────────────────────────────────────────────────
+# ── Ablation 遍历 ───────────────────────────────────────────────────────────
 
 def run_ablation(args):
-    """Run full ablation: ε × seeds grid."""
+    """执行完整 ablation：ε × seeds 网格。"""
     all_results = {}
 
     for epsilon in args.epsilons:
@@ -381,9 +381,9 @@ def run_ablation(args):
                 all_results[key] = []
             all_results[key].append(results)
 
-    # Print summary table
+    # 打印汇总表
     print("\n" + "="*60)
-    print("  ABLATION SUMMARY")
+    print("  ABLATION 汇总")
     print("="*60)
     print(f"{'ε':>8}  {'Success(mean)':>14}  {'Success(std)':>13}  {'Reward(mean)':>13}")
     print("-"*60)
@@ -393,19 +393,19 @@ def run_ablation(args):
         print(f"{key:>8}  {np.mean(success_rates):>14.2%}  "
               f"{np.std(success_rates):>13.2%}  {np.mean(rewards):>13.3f}")
 
-    # Save summary
+    # 保存汇总
     summary_path = Path(args.log_dir) / "ablation_summary.json"
     with open(summary_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSummary saved to {summary_path}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── 入口 ───────────────────────────────────────────────────────────────────
 
 def main():
     args = get_args()
 
-    # Validate
+    # 校验
     if args.epsilon > 0 and not args.api_key:
         print("WARNING: --epsilon > 0 requires --api-key or LLM_API_KEY env var.")
         print("Continuing with ε=0 (pure SAC).")

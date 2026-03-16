@@ -3,13 +3,12 @@
 """
 camera_perception.py
 ====================
-Real-camera perception module for sim-to-real deployment.
+真实相机感知模块，用于 sim-to-real 部署。
 
-Subscribes to the HSV color detector from Lab2
-(sagittarius_object_color_detector) and provides object positions
-in robot base frame coordinates.
+订阅 Lab2 的 HSV 颜色检测（sagittarius_object_color_detector），
+在机器人基座坐标系下提供物体位置。
 
-This replaces the Gazebo GT+noise perception during evaluation on the real robot.
+在真实机械臂上评估时，用本模块替代 Gazebo 真值+噪声的感知。
 """
 
 import numpy as np
@@ -17,9 +16,9 @@ import rospy
 from typing import Dict, Optional, Tuple
 
 
-# ── Default calibration (replace with your actual values from Lab2 calibration) ──
-# These come from the output of camera_calibration_hsv.launch
-# Format: y_robot = ky * x_camera + by,  x_robot = kx * y_camera + bx
+# ── 默认标定（请用 Lab2 标定得到的实际值替换）──────────────────────────────────
+# 来自 camera_calibration_hsv.launch 的输出
+# 格式：y_robot = ky * x_camera + by,  x_robot = kx * y_camera + bx
 DEFAULT_CALIB = {
     "kx":  -0.00029,
     "bx":   0.31084,
@@ -27,41 +26,40 @@ DEFAULT_CALIB = {
     "by":   0.09080,
 }
 
-# Color index mapping (must match pick_place_env.py)
+# 颜色名列表（须与 pick_place_env.py 一致）
 COLOR_NAMES = ["red", "green", "blue"]
 
 
 class CameraPerception:
     """
-    Bridges the Lab2 HSV color detection system with the RL environment.
+    将 Lab2 的 HSV 颜色检测与 RL 环境桥接。
 
-    The Lab2 detector publishes object detections as pixel coordinates.
-    This class converts them to robot-frame (x, y) coordinates using
-    the calibration learned in Lab2.
+    Lab2 检测器发布的是像素坐标，本类用 Lab2 学到的标定
+    将其转换为机器人基座坐标系下的 (x, y)。
 
-    Subscribed topics (from sagittarius_object_color_detector):
+    订阅的话题（来自 sagittarius_object_color_detector）：
         /object_detector/red_object   (geometry_msgs/Point)
         /object_detector/green_object (geometry_msgs/Point)
         /object_detector/blue_object  (geometry_msgs/Point)
 
-    If using a custom detection topic, update _setup_subscribers().
+    若使用自定义检测话题，请修改 _setup_subscribers()。
     """
 
     def __init__(self, calib: Dict = None):
         self.calib = calib or DEFAULT_CALIB
-        self._detections = {}   # color → (pixel_x, pixel_y) or None
+        self._detections = {}   # 颜色 → (pixel_x, pixel_y) 或 None
 
         self._setup_subscribers()
         rospy.loginfo("[CameraPerception] Initialised. Waiting for detections...")
 
     def _setup_subscribers(self):
-        """Subscribe to HSV detector output topics."""
+        """订阅 HSV 检测器输出的话题。"""
         try:
             from geometry_msgs.msg import Point
 
             for color in COLOR_NAMES:
                 topic = f"/object_detector/{color}_object"
-                # Use a closure to capture color correctly
+                # 用闭包正确捕获 color
                 def make_cb(c):
                     def cb(msg):
                         self._detections[c] = (float(msg.x), float(msg.y))
@@ -76,10 +74,10 @@ class CameraPerception:
 
     def pixel_to_robot(self, px: float, py: float) -> Tuple[float, float]:
         """
-        Convert camera pixel coordinates (px, py) to robot base-frame
-        coordinates (x, y) using the linear regression calibration.
+        用线性回归标定将相机像素坐标 (px, py) 转换为
+        机器人基座坐标系下的 (x, y)。
 
-        The calibration from Lab2 gives:
+        Lab2 标定关系：
             x_robot = kx * py + bx
             y_robot = ky * px + by
         """
@@ -90,14 +88,13 @@ class CameraPerception:
     def get_object_positions(self,
                              timeout_sec: float = 1.0) -> Dict[str, np.ndarray]:
         """
-        Return the latest detected positions for all blocks in robot frame.
+        返回所有块在机器人坐标系下的最新检测位置。
 
         Args:
-            timeout_sec: how long to wait for a detection update
+            timeout_sec: 等待检测更新的最长时间（秒）
 
         Returns:
-            dict: {color: np.array([x, y])} for each detected color
-                  Returns np.zeros(2) for undetected objects.
+            dict: 每种颜色 {color: np.array([x, y])}；未检测到的物体为 np.zeros(2)。
         """
         deadline = rospy.Time.now() + rospy.Duration(timeout_sec)
         while rospy.Time.now() < deadline:
@@ -119,17 +116,17 @@ class CameraPerception:
 
     def build_observation_positions(self) -> np.ndarray:
         """
-        Build the (N_total, 2) positions array for the RL observation,
-        using camera detections for blocks and fixed positions for bowls.
+        构建 RL 观测用的 (N_total, 2) 位置数组：
+        块用相机检测，碗用固定位置。
 
-        Bowl positions are fixed in the scene (same as training setup).
+        碗的位置与训练时场景一致（固定）。
         """
         from envs.pick_place_env import (BLOCK_NAMES, BOWL_NAMES,
                                          N_TOTAL, TABLE_Z)
 
         block_positions = self.get_object_positions()
 
-        # Fixed bowl positions (match _randomize_objects in pick_place_env.py)
+        # 碗的固定位置（与 pick_place_env.py 中 _randomize_objects 一致）
         bowl_positions_fixed = {
             "red_bowl":   np.array([0.35, -0.15], dtype=np.float32),
             "green_bowl": np.array([0.35,  0.00], dtype=np.float32),
@@ -145,28 +142,27 @@ class CameraPerception:
             all_positions.append(bowl_positions_fixed.get(
                 name, np.zeros(2, dtype=np.float32)))
 
-        return np.array(all_positions, dtype=np.float32)  # (N_total, 2)
+        return np.array(all_positions, dtype=np.float32)  # 形状 (N_total, 2)
 
     def update_calibration(self, kx: float, bx: float,
                            ky: float, by: float):
         """
-        Update calibration coefficients.
-        Call this after running Lab2's camera_calibration_hsv.launch.
+        更新标定系数。
+        在运行 Lab2 的 camera_calibration_hsv.launch 后调用。
         """
         self.calib = {"kx": kx, "bx": bx, "ky": ky, "by": by}
         rospy.loginfo(f"[CameraPerception] Calibration updated: {self.calib}")
 
     def load_calibration_from_yaml(self, yaml_path: str):
         """
-        Load calibration from the vision_config.yaml saved by Lab2.
-        The Lab2 script saves linear regression k,b values there.
+        从 Lab2 保存的 vision_config.yaml 加载标定。
+        Lab2 脚本将线性回归的 k、b 保存在该文件中。
         """
         import yaml
         try:
             with open(yaml_path, "r") as f:
                 config = yaml.safe_load(f)
-            # The Lab2 calibration output format stores kx, bx, ky, by
-            # Adjust keys if your YAML has different names
+            # Lab2 标定输出格式为 kx, bx, ky, by；若 YAML 键名不同请相应修改
             self.calib["kx"] = float(config.get("kx", self.calib["kx"]))
             self.calib["bx"] = float(config.get("bx", self.calib["bx"]))
             self.calib["ky"] = float(config.get("ky", self.calib["ky"]))

@@ -3,17 +3,17 @@
 """
 llm_policy.py
 =============
-LLM-based exploration strategy (πEXP) implementing Algorithm 1 from ExploRLLM.
+基于 LLM 的探索策略（πEXP），实现 ExploRLLM 的 Algorithm 1。
 
-Supports:
-  - OpenAI-compatible API (GPT-4o-mini, DeepSeek, Kimi/Moonshot, etc.)
-  - High-level policy πH: selects (primitive, object_index) from scene state
-  - Low-level policy πL: generates Python affordance map code → sample position
+支持：
+  - OpenAI 兼容 API（GPT-4o-mini、DeepSeek、Kimi/Moonshot 等）
+  - 高层策略 πH：根据场景状态选择 (primitive, object_index)
+  - 低层策略 πL：生成 Python 可操作图代码 → 采样位置
 
-Usage:
+用法：
     from llm.llm_policy import LLMExplorationPolicy
     policy = LLMExplorationPolicy(api_key=..., base_url=..., model=...)
-    action = policy.explore(state)
+    action = policy.get_exploration_action(obs_dict, crops)
 """
 
 import os
@@ -32,7 +32,7 @@ except ImportError:
     raise ImportError("Please install openai: pip install openai")
 
 
-# ── Model config presets ──────────────────────────────────────────────────────
+# ── 模型配置预设 ──────────────────────────────────────────────────────────────
 
 MODEL_PRESETS = {
     # OpenAI
@@ -40,7 +40,7 @@ MODEL_PRESETS = {
         "base_url": "https://api.openai.com/v1",
         "model":    "gpt-4o-mini",
     },
-    # DeepSeek  (cost-effective, strong code generation)
+    # DeepSeek（性价比高、代码生成能力强）
     "deepseek-v3": {
         "base_url": "https://api.deepseek.com/v1",
         "model":    "deepseek-chat",
@@ -50,7 +50,7 @@ MODEL_PRESETS = {
         "base_url": "https://api.moonshot.cn/v1",
         "model":    "moonshot-v1-8k",
     },
-    # Qwen (Alibaba)
+    # Qwen（阿里）
     "qwen": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "model":    "qwen-turbo",
@@ -58,43 +58,41 @@ MODEL_PRESETS = {
 }
 
 
-# ── State description helpers ─────────────────────────────────────────────────
+# ── 状态描述辅助 ──────────────────────────────────────────────────────────────
 
 def _describe_state(obs_dict: Dict[str, Any]) -> str:
     """
-    Convert parsed observation dict to a natural-language scene description
-    for the LLM prompt.
+    将解析后的观测字典转成自然语言场景描述，供 LLM 提示使用。
 
-    obs_dict keys:
-        positions   : {name: [x,y]} for each tracked object
+    obs_dict 键：
+        positions   : 每个跟踪物体 {name: [x,y]}
         gripper     : "open" | "closed"
         pick_color  : str
         place_color : str
-        held_object : str | None   (which block is in gripper, if any)
+        held_object : str | None（夹爪中拿着的块，若有）
     """
     lines = []
-    lines.append(f"Task: Pick the {obs_dict['pick_color']} block and place it "
-                 f"in the {obs_dict['place_color']} bowl.")
-    lines.append(f"Gripper: {obs_dict['gripper']}")
+    lines.append(f"任务：将 {obs_dict['pick_color']} 块放入 {obs_dict['place_color']} 碗中。")
+    lines.append(f"夹爪：{obs_dict['gripper']}")
     if obs_dict.get("held_object"):
-        lines.append(f"Currently holding: {obs_dict['held_object']}")
+        lines.append(f"当前手持：{obs_dict['held_object']}")
     else:
-        lines.append("Currently holding: nothing")
-    lines.append("Object positions (x,y in meters from robot base):")
+        lines.append("当前手持：无")
+    lines.append("物体位置（相对机器人基座的 x,y，单位米）：")
     for name, pos in obs_dict["positions"].items():
         lines.append(f"  {name}: x={pos[0]:.3f}, y={pos[1]:.3f}")
     return "\n".join(lines)
 
 
-# ── Few-shot examples ─────────────────────────────────────────────────────────
+# ── 高层 few-shot 示例 ───────────────────────────────────────────────────────
 
 HIGH_LEVEL_EXAMPLES = [
     {
         "scene": textwrap.dedent("""
-            Task: Pick the red block and place it in the blue bowl.
-            Gripper: open
-            Currently holding: nothing
-            Object positions:
+            任务：将红块放入蓝碗中。
+            夹爪：open
+            当前手持：无
+            物体位置（相对机器人基座的 x,y，单位米）：
               red_block:   x=0.25, y=-0.05
               green_block: x=0.28, y= 0.08
               blue_block:  x=0.22, y= 0.12
@@ -102,55 +100,55 @@ HIGH_LEVEL_EXAMPLES = [
               green_bowl:  x=0.35, y= 0.00
               blue_bowl:   x=0.35, y= 0.15
         """).strip(),
-        "response": '{"primitive": 0, "object_name": "red_block", "object_index": 0, "reason": "Gripper is open and holding nothing, so we should pick the red block first."}'
+        "response": '{"primitive": 0, "object_name": "red_block", "object_index": 0, "reason": "夹爪张开且未持物，应先抓取红块。"}'
     },
     {
         "scene": textwrap.dedent("""
-            Task: Pick the red block and place it in the blue bowl.
-            Gripper: closed
-            Currently holding: red_block
-            Object positions:
+            任务：将红块放入蓝碗中。
+            夹爪：closed
+            当前手持：red_block
+            物体位置（相对机器人基座的 x,y，单位米）：
               red_block:   x=0.25, y=-0.05
               blue_bowl:   x=0.35, y= 0.15
         """).strip(),
-        "response": '{"primitive": 1, "object_name": "blue_bowl", "object_index": 4, "reason": "Holding the red block, so next we place it in the blue bowl."}'
+        "response": '{"primitive": 1, "object_name": "blue_bowl", "object_index": 4, "reason": "已持红块，下一步应放入蓝碗。"}'
     },
 ]
 
 HIGH_LEVEL_SYSTEM = textwrap.dedent("""
-    You are a robot manipulation planner for a 6-DOF robotic arm.
-    Given the current scene state, decide the NEXT single primitive action:
-      - primitive 0 = PICK (grasp an object)
-      - primitive 1 = PLACE (release into a container)
+    你是一个六自由度机械臂的操控规划器。
+    根据当前场景状态，决定下一步的单一原语动作：
+      - primitive 0 = 抓取（PICK，抓取一个物体）
+      - primitive 1 = 放置（PLACE，放入容器）
 
-    Object index mapping:
+    物体索引对应关系：
       0=red_block, 1=green_block, 2=blue_block,
       3=red_bowl,  4=green_bowl,  5=blue_bowl
 
-    Rules:
-    1. If gripper is open and holding nothing → choose PICK.
-    2. If gripper is closed and holding something → choose PLACE.
-    3. Pick the block matching the task's pick_color.
-    4. Place into the bowl matching the task's place_color.
+    规则：
+    1. 若夹爪张开且未持物 → 选择 PICK。
+    2. 若夹爪闭合且持物 → 选择 PLACE。
+    3. 抓取时选择与任务 pick_color 匹配的块。
+    4. 放置时选择与任务 place_color 匹配的碗。
 
-    Respond ONLY with a JSON object. No other text.
-    Format: {"primitive": <int>, "object_name": <str>, "object_index": <int>, "reason": <str>}
+    仅回复一个 JSON 对象，不要其他文字。
+    格式：{"primitive": <int>, "object_name": <str>, "object_index": <int>, "reason": <str>}
 """).strip()
 
 
 LOW_LEVEL_SYSTEM = textwrap.dedent("""
-    You are a robot vision expert generating Python code for a robotic pick-and-place system.
-    Given a 28x28 RGB image crop of an object, write a Python function that returns
-    a 28x28 numpy probability map indicating good grasp or place positions.
+    你是为机器人拾放系统生成 Python 代码的视觉专家。
+    给定一个物体的 28×28 RGB 图像块，请写一个 Python 函数，返回
+    28×28 的 numpy 概率图，表示适合抓取或放置的位置。
 
-    RULES:
-    1. Only use numpy and opencv (cv2). No other imports.
-    2. Function signature: generate_probability_map(img) -> np.ndarray of shape (28,28), float32
-    3. Values should be non-negative; they will be normalised to sum to 1.
-    4. For rectangular/cubic objects: prefer the center region.
-    5. For bowls/round containers: prefer the interior rim area.
-    6. Handle edge cases (all-zero image) gracefully.
-    7. Return ONLY the Python function. No explanation, no markdown, no backticks.
+    规则：
+    1. 仅使用 numpy 和 opencv (cv2)，不要其他 import。
+    2. 函数签名：generate_probability_map(img) -> np.ndarray，形状 (28,28)，float32。
+    3. 数值非负，后续会归一化为和为 1。
+    4. 对矩形/立方体物体：优先中心区域。
+    5. 对碗/圆形容器：优先内缘区域。
+    6. 妥善处理边界情况（如全零图像）。
+    7. 只返回 Python 函数代码，不要解释、不要 markdown、不要反引号。
 """).strip()
 
 LOW_LEVEL_EXAMPLE_BLOCK = textwrap.dedent("""
@@ -183,13 +181,13 @@ LOW_LEVEL_EXAMPLE_BOWL = textwrap.dedent("""
 """).strip()
 
 
-# ── Affordance map evaluation ─────────────────────────────────────────────────
+# ── 可操作图代码评估 ─────────────────────────────────────────────────────────
 
 def _evaluate_candidate(code: str, crop: np.ndarray, n_samples: int = 5) -> float:
     """
-    Run the generated code on a crop and return a score.
-    Score = fraction of samples that land in the non-zero region of the mask.
-    Returns 0.0 if code fails to execute or produces invalid output.
+    在给定 crop 上运行生成的代码并返回得分。
+    得分为采样点落在概率非零区域的比例。
+    若代码执行失败或输出无效则返回 0.0。
     """
     try:
         namespace = {}
@@ -206,21 +204,19 @@ def _evaluate_candidate(code: str, crop: np.ndarray, n_samples: int = 5) -> floa
         if np.isnan(prob).any() or np.isinf(prob).any():
             return 0.0
 
-        # Score: entropy-like measure of the distribution quality
-        # Higher score if probability is spread over plausible region (not degenerate)
+        # 得分：类似分布质量的度量，概率分布在合理区域（非退化）时得分更高
         prob = np.clip(prob, 0, None)
         s = prob.sum()
         if s < 1e-9:
             return 0.0
         prob = prob / s
 
-        # Sample n_samples positions
+        # 采样 n_samples 个位置
         flat = prob.flatten()
         indices = np.random.choice(len(flat), size=n_samples, p=flat)
         ys, xs = np.unravel_index(indices, (28, 28))
 
-        # Score: how many samples are in the center 50% of the image
-        # (penalises degenerate corners)
+        # 得分：有多少采样点落在图像中心 50% 区域（惩罚退化到角落的情况）
         in_center = np.sum((xs >= 7) & (xs <= 21) & (ys >= 7) & (ys <= 21))
         return float(in_center) / n_samples
 
@@ -228,17 +224,17 @@ def _evaluate_candidate(code: str, crop: np.ndarray, n_samples: int = 5) -> floa
         return 0.0
 
 
-# ── Main policy class ─────────────────────────────────────────────────────────
+# ── 主策略类 ─────────────────────────────────────────────────────────────────
 
 class LLMExplorationPolicy:
     """
-    Implements πEXP = ε-greedy LLM exploration from Algorithm 1 of ExploRLLM.
+    实现 ExploRLLM Algorithm 1 中的 πEXP = ε-greedy LLM 探索。
 
-    At each timestep, with probability ε:
-        1. Call πH_LLM → (primitive, obj_index)
-        2. Call πL_LLM → sample x_r from affordance map
-        3. Return ã_t = (primitive, obj_index, x_r)
-    Otherwise, defer to the RL policy (handled externally).
+    每个时间步以概率 ε：
+        1. 调用 πH_LLM → (primitive, obj_index)
+        2. 调用 πL_LLM → 从可操作图采样 x_r
+        3. 返回 ã_t = (primitive, obj_index, x_r)
+    否则由外部 RL 策略处理。
     """
 
     def __init__(self,
@@ -250,47 +246,47 @@ class LLMExplorationPolicy:
                  api_timeout: float = 30.0):
         """
         Args:
-            api_key     : API key for your LLM provider
-            base_url    : API base URL (None = OpenAI default)
-            model       : model name string (use MODEL_PRESETS key or full name)
-            epsilon     : exploration probability
-            n_candidates: number of low-level code candidates to generate
-            api_timeout : request timeout in seconds
+            api_key     : LLM 服务商的 API key
+            base_url    : API 根地址（None 则用 OpenAI 默认）
+            model       : 模型名字符串（用 MODEL_PRESETS 的 key 或完整名）
+            epsilon     : 探索概率
+            n_candidates: 低层生成的代码候选数量
+            api_timeout : 请求超时（秒）
         """
         self.epsilon      = epsilon
         self.n_candidates = n_candidates
         self.api_timeout  = api_timeout
 
-        # Resolve preset
+        # 解析预设
         if model in MODEL_PRESETS:
             preset   = MODEL_PRESETS[model]
             base_url = base_url or preset["base_url"]
             model    = preset["model"]
         self.model = model
 
-        # Build OpenAI-compatible client
+        # 构建 OpenAI 兼容客户端
         kwargs = {"api_key": api_key, "timeout": api_timeout}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
 
-        # Cache for low-level code candidates (keyed by object name)
+        # 低层代码候选缓存（按物体名索引）
         self._code_cache: Dict[str, str] = {}
 
         print(f"[LLM] Initialised with model={self.model}, ε={self.epsilon}, "
               f"n_candidates={self.n_candidates}")
 
-    # ── High-level policy πH ──────────────────────────────────────────────────
+    # ── 高层策略 πH ──────────────────────────────────────────────────────────
 
     def call_high_level(self, obs_dict: Dict[str, Any]) -> Tuple[int, int]:
         """
-        πH_LLM: Given scene state, return (primitive, object_index).
+        πH_LLM：根据场景状态返回 (primitive, object_index)。
 
-        Returns (0, 0) as fallback on failure.
+        失败时返回 (0, 0) 作为兜底。
         """
         scene_str = _describe_state(obs_dict)
 
-        # Build few-shot messages
+        # 构建 few-shot 消息
         messages = [{"role": "system", "content": HIGH_LEVEL_SYSTEM}]
         for ex in HIGH_LEVEL_EXAMPLES:
             messages.append({"role": "user",      "content": ex["scene"]})
@@ -306,9 +302,9 @@ class LLMExplorationPolicy:
             )
             content = resp.choices[0].message.content.strip()
 
-            # Parse JSON response
+            # 解析 JSON 回复
             import json
-            # Handle potential markdown wrapping
+            # 去掉可能的 markdown 代码块包裹
             content = re.sub(r"```[a-z]*\n?", "", content).strip()
             data = json.loads(content)
             primitive  = int(data["primitive"])
@@ -322,21 +318,20 @@ class LLMExplorationPolicy:
             print(f"[LLM-H] Failed: {e}. Using fallback (0,0).")
             return 0, 0
 
-    # ── Low-level policy πL ───────────────────────────────────────────────────
+    # ── 低层策略 πL ──────────────────────────────────────────────────────────
 
     def call_low_level(self, obj_name: str, crop: np.ndarray,
                        force_regenerate: bool = False) -> np.ndarray:
         """
-        πL_LLM: Generate affordance map code for the given object crop.
-        Returns a sampled (x_r, y_r) residual offset in meters.
+        πL_LLM：为给定物体 crop 生成可操作图代码，返回采样的 (x_r, y_r) 残差偏移（米）。
 
-        Strategy:
-          1. Check code cache; if miss, generate n_candidates via LLM.
-          2. Evaluate candidates on the crop, keep best.
-          3. Sample position from the best affordance map.
-          4. Convert pixel offset (0..27) → meter offset.
+        策略：
+          1. 查代码缓存；未命中则用 LLM 生成 n_candidates 个候选。
+          2. 在 crop 上评估候选，保留最佳。
+          3. 从最佳可操作图采样位置。
+          4. 将像素偏移 (0..27) 转为米。
         """
-        PIXEL_TO_METER = 0.003  # ~3mm per pixel at typical Sagittarius workspace
+        PIXEL_TO_METER = 0.003  # 典型 Sagittarius 工作空间下约 3mm/像素
 
         if obj_name not in self._code_cache or force_regenerate:
             self._code_cache[obj_name] = self._generate_best_code(
@@ -355,11 +350,11 @@ class LLMExplorationPolicy:
                 return np.zeros(2, dtype=np.float32)
             prob = prob / s
 
-            # Sample pixel position from affordance map
+            # 从可操作图按概率采样一个像素位置
             flat_idx = np.random.choice(len(prob.flatten()), p=prob.flatten())
             py, px = np.unravel_index(flat_idx, (28, 28))
 
-            # Convert pixel offset from crop center to meters
+            # 将相对 crop 中心的像素偏移转为米
             center = 14.0
             dx_pix = float(px) - center
             dy_pix = float(py) - center
@@ -374,24 +369,22 @@ class LLMExplorationPolicy:
     def _generate_best_code(self, obj_name: str,
                             crop: np.ndarray) -> str:
         """
-        Generate n_candidates affordance map functions via LLM,
-        evaluate on the crop, return the best one.
-        Falls back to a simple default if LLM fails.
+        通过 LLM 生成 n_candidates 个可操作图函数，在 crop 上评估后返回最佳。
+        LLM 失败时退回简单默认代码。
         """
         is_bowl = "bowl" in obj_name
         example = LOW_LEVEL_EXAMPLE_BOWL if is_bowl else LOW_LEVEL_EXAMPLE_BLOCK
 
-        # Build prompt
+        # 构建提示
         prompt = textwrap.dedent(f"""
-            Generate a Python function `generate_probability_map(img)` for
-            a 28x28 RGB image crop of a **{'bowl/container' if is_bowl else 'rectangular block'}**
-            called '{obj_name}'.
+            请为名为 '{obj_name}' 的物体的 28×28 RGB 图像块，生成一个 Python 函数 `generate_probability_map(img)`。
+            该物体是**{'碗/容器' if is_bowl else '矩形块'}**。
 
-            Example of a correct function:
+            正确函数示例：
             {example}
 
-            Now write a NEW, DIFFERENT function following the same rules.
-            Return only the function code, no markdown, no explanation.
+            请按相同规则写一个**新的、不同的**函数。
+            只返回函数代码，不要 markdown、不要解释。
         """).strip()
 
         candidates = []
@@ -403,11 +396,11 @@ class LLMExplorationPolicy:
                 resp = self._client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    temperature=0.7,  # higher temperature → more diverse code
+                    temperature=0.7,  # 较高温度以得到更多样化的代码
                     max_tokens=400,
                 )
                 code_raw = resp.choices[0].message.content.strip()
-                # Strip markdown code fences if present
+                # 去掉可能的 markdown 代码围栏
                 code_raw = re.sub(r"```[a-z]*\n?", "", code_raw).strip()
                 code_raw = re.sub(r"```", "", code_raw).strip()
                 candidates.append(code_raw)
@@ -416,43 +409,43 @@ class LLMExplorationPolicy:
 
         if not candidates:
             print(f"[LLM-L] All candidates failed, using default code.")
-            return example  # fallback to hardcoded example
+            return example  # 退回硬编码示例
 
-        # Evaluate all candidates, keep the best
+        # 评估所有候选，保留得分最高者
         scores = [_evaluate_candidate(c, crop) for c in candidates]
         best_idx = int(np.argmax(scores))
         print(f"[LLM-L] {len(candidates)} candidates scored: {scores} → "
               f"selecting #{best_idx} (score={scores[best_idx]:.3f})")
         return candidates[best_idx]
 
-    # ── Main exploration interface ────────────────────────────────────────────
+    # ── 主探索接口 ────────────────────────────────────────────────────────────
 
     def should_explore(self) -> bool:
-        """Sample whether this step should use LLM exploration."""
+        """按概率采样本步是否使用 LLM 探索。"""
         return np.random.random() < self.epsilon
 
     def get_exploration_action(self,
                                obs_dict: Dict[str, Any],
                                crops: np.ndarray) -> np.ndarray:
         """
-        Full LLM exploration: πH then πL → ã_t.
+        完整 LLM 探索：先 πH 再 πL → ã_t。
 
         Args:
-            obs_dict  : parsed observation dict (see _describe_state)
-            crops     : (N_total, 3, 28, 28) image crops
+            obs_dict  : 解析后的观测字典（见 _describe_state）
+            crops     : (N_total, 3, 28, 28) 图像块
 
         Returns:
             action: [primitive, obj_index, res_x, res_y]
         """
-        # Step 1: High-level decision
+        # 步骤 1：高层决策
         primitive, obj_idx = self.call_high_level(obs_dict)
 
-        # Step 2: Low-level residual from affordance map
+        # 步骤 2：从可操作图得到低层残差
         from envs.pick_place_env import ALL_OBJECTS
         obj_name = (ALL_OBJECTS[obj_idx]
                     if 0 <= obj_idx < len(ALL_OBJECTS) else "unknown")
 
-        # Get the corresponding crop (C,H,W) → (H,W,C) for OpenCV
+        # 取对应 crop， (C,H,W) → (H,W,C) 供 OpenCV 使用
         if 0 <= obj_idx < len(crops):
             crop_chw = crops[obj_idx]  # (3, 28, 28)
             crop_hwc = (crop_chw.transpose(1, 2, 0) * 255).astype(np.uint8)
@@ -467,6 +460,6 @@ class LLMExplorationPolicy:
         return action
 
     def clear_cache(self):
-        """Clear low-level code cache (call when scene changes significantly)."""
+        """清空低层代码缓存（场景变化较大时调用）。"""
         self._code_cache.clear()
         print("[LLM] Code cache cleared.")

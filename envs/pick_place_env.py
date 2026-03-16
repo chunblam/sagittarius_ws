@@ -3,23 +3,23 @@
 """
 pick_place_env.py
 =================
-Gazebo gym.Env wrapper for Sagittarius pick-and-place task.
+Sagittarius 拾放任务的 Gazebo gym.Env 封装。
 
-This is the core environment that bridges:
-  - stable-baselines3 (SAC training loop)
-  - ROS / MoveIt (motion execution)
-  - Gazebo (simulation state & physics)
+本环境桥接：
+  - stable-baselines3（SAC 训练循环）
+  - ROS / MoveIt（运动执行）
+  - Gazebo（仿真状态与物理）
 
-Observation space:
-  - image_patches : (N_obj, 3, 28, 28)  per-object RGB crops
-  - obj_positions : (N_obj, 2)           x,y positions with Gaussian noise
-  - gripper_state : (1,)                 0=open, 1=closed
-  - lang_goal     : (N_obj*2,)           one-hot encoding of pick/place targets
+观测空间：
+  - image_patches : (N_obj, 3, 28, 28)  每个物体的 RGB 裁剪块
+  - obj_positions : (N_obj, 2)           带高斯噪声的 x,y 位置
+  - gripper_state : (1,)                 0=张开，1=闭合
+  - lang_goal     : (N_obj*2,)           抓取/放置目标的 one-hot 编码
 
-Action space (residual, object-centric):
-  - primitive  : int  0=pick, 1=place
-  - obj_index  : int  which object to act on
-  - residual_xy: (2,) offset from object center (meters)
+动作空间（残差、以物体为中心）：
+  - primitive  : int  0=抓取，1=放置
+  - obj_index  : int  对哪个物体操作
+  - residual_xy: (2,) 相对物体中心的偏移（米）
 """
 
 import os
@@ -42,47 +42,47 @@ from geometry_msgs.msg import PoseStamped
 import sys
 
 
-# ── Scene configuration ──────────────────────────────────────────────────────
+# ── 场景配置 ─────────────────────────────────────────────────────────────────
 
-# Object names as they appear in Gazebo
+# Gazebo 中出现的物体名称
 BLOCK_NAMES  = ["red_block",   "green_block",  "blue_block"]
 BOWL_NAMES   = ["red_bowl",    "green_bowl",   "blue_bowl"]
 ALL_OBJECTS  = BLOCK_NAMES + BOWL_NAMES
 
-# Colors used for language encoding index
+# 用于语言编码索引的颜色
 COLOR_INDEX  = {"red": 0, "green": 1, "blue": 2}
 
-# Table workspace bounds (meters, in robot base frame)
+# 桌面工作范围（米，机器人基坐标系）
 TABLE_X_MIN, TABLE_X_MAX = 0.15, 0.40
 TABLE_Y_MIN, TABLE_Y_MAX = -0.20, 0.20
-TABLE_Z = 0.02  # surface height above base
+TABLE_Z = 0.02  # 桌面相对基座高度
 
-# Grasp/place heights
-APPROACH_HEIGHT  = 0.12   # meters above table for pre-grasp
-GRASP_HEIGHT     = 0.005  # meters above object center for actual grasp
-PLACE_HEIGHT     = 0.06   # meters above bowl center for release
+# 抓取/放置高度
+APPROACH_HEIGHT  = 0.12   # 预抓取时桌面以上高度
+GRASP_HEIGHT     = 0.005  # 实际抓取时物体中心以上高度
+PLACE_HEIGHT     = 0.06   # 在碗中心上方释放的高度
 
-# Image crop size
+# 图像裁剪尺寸
 CROP_SIZE = 28
 
-# Noise sigma: half the crop radius in meters (as per ExploRLLM paper)
-# Assumes each crop covers ~8cm radius → σ = 0.04
+# 位置噪声 sigma：约等于裁剪半径的一半（米，参考 ExploRLLM 论文）
+# 假设每个裁剪覆盖约 8cm 半径 → σ = 0.04
 POSITION_NOISE_SIGMA = 0.04
 
-# Number of objects tracked (blocks only for pick, all for place reference)
+# 跟踪的物体数量（抓取仅用块，放置时参考全部）
 N_OBJECTS = len(BLOCK_NAMES)      # 3
 N_TARGETS = len(BOWL_NAMES)       # 3
 N_TOTAL   = N_OBJECTS + N_TARGETS # 6
 
 
-# ── Environment ───────────────────────────────────────────────────────────────
+# ── 环境类 ───────────────────────────────────────────────────────────────────
 
 class SagittariusPickPlaceEnv(gym.Env):
     """
-    Single-step pick-or-place environment for Sagittarius SGR532.
+    Sagittarius SGR532 的单步抓取或放置环境。
 
-    Each call to step() executes ONE primitive (pick OR place).
-    The agent must chain pick → place to complete a task.
+    每次 step() 只执行一个原语（抓取 或 放置）。
+    智能体需串联 抓取 → 放置 才能完成一次任务。
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -94,11 +94,11 @@ class SagittariusPickPlaceEnv(gym.Env):
                  render_mode: str = None):
         """
         Args:
-            task        : "short_horizon" (pick one, place one) or
-                          "long_horizon" (sort all blocks)
-            max_steps   : max primitive steps per episode
-            noise_sigma : std of Gaussian noise added to GT positions
-            render_mode : gymnasium render mode (unused, Gazebo handles viz)
+            task        : "short_horizon"（抓一个放一个）或
+                          "long_horizon"（把所有块按颜色放入对应碗）
+            max_steps   : 每个 episode 最大原语步数
+            noise_sigma : 加到真值位置上的高斯噪声标准差
+            render_mode : gymnasium 渲染模式（未用，由 Gazebo 负责显示）
         """
         super().__init__()
 
@@ -109,20 +109,18 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._step_count  = 0
         self._gripper_open = True
 
-        # Current episode language goal
-        self.pick_color   = None   # e.g. "red"
-        self.place_color  = None   # e.g. "blue"
+        # 当前 episode 的语言目标
+        self.pick_color   = None   # 例如 "red"
+        self.place_color  = None   # 例如 "blue"
 
-        # ── Gymnasium spaces ──────────────────────────────────────────────────
-        # Observation: flat dict-like Box for stable-baselines3 compatibility
-        #   We flatten everything; CustomSACPolicy will un-flatten.
-        #
-        # Layout: [img_patches(N_total*3*28*28), positions(N_total*2),
-        #          gripper(1), lang_onehot(6)]
+        # ── Gymnasium 空间定义 ─────────────────────────────────────────────────
+        # 观测：扁平 Box，便于 stable-baselines3，由 CustomSACPolicy 再拆开
+        # 布局: [img_patches(N_total*3*28*28), positions(N_total*2),
+        #        gripper(1), lang_onehot(6)]
         img_dim   = N_TOTAL * 3 * CROP_SIZE * CROP_SIZE  # 6*3*28*28 = 14112
         pos_dim   = N_TOTAL * 2                           # 12
         grip_dim  = 1
-        lang_dim  = N_OBJECTS + N_TARGETS                 # 6  (one-hot pick + place)
+        lang_dim  = N_OBJECTS + N_TARGETS                 # 6  (抓/放 one-hot)
         obs_dim   = img_dim + pos_dim + grip_dim + lang_dim
 
         self.observation_space = spaces.Box(
@@ -130,41 +128,40 @@ class SagittariusPickPlaceEnv(gym.Env):
             shape=(obs_dim,), dtype=np.float32
         )
 
-        # Action: [primitive(1), obj_index(1), residual_x(1), residual_y(1)]
-        # primitive and obj_index are continuous here; we discretize via rounding.
+        # 动作: [primitive(1), obj_index(1), residual_x(1), residual_y(1)]
+        # 此处 primitive、obj_index 为连续值，通过四舍五入离散化
         self.action_space = spaces.Box(
             low=np.array([0.0, 0.0, -0.05, -0.05], dtype=np.float32),
             high=np.array([1.0, float(N_TOTAL-1), 0.05, 0.05], dtype=np.float32)
         )
 
-        # ── ROS / MoveIt init ─────────────────────────────────────────────────
+        # ── ROS / MoveIt 初始化（延后到首次 reset 再执行）──────────────────────
         self._ros_initialized = False
         self._moveit_arm      = None
         self._moveit_gripper  = None
-        self._model_states    = None  # latest /gazebo/model_states message
-        self._image_cache     = {}    # object_name -> latest np.ndarray (H,W,3)
+        self._model_states    = None  # 最新的 /gazebo/model_states 消息
+        self._image_cache     = {}    # 物体名 -> 最新 np.ndarray (H,W,3)
 
-        # Deferred: call _init_ros() on first reset() to avoid
-        # rospy.init_node conflicts when running multiple envs.
+        # 延后调用 _init_ros()，在首次 reset() 时执行，避免多 env 时 rospy.init_node 冲突
 
-    # ── ROS initialisation ────────────────────────────────────────────────────
+    # ── ROS 初始化 ────────────────────────────────────────────────────────────
 
     def _init_ros(self):
-        """Initialise ROS node, MoveIt, and topic subscriptions."""
+        """初始化 ROS 节点、MoveIt 及话题订阅。"""
         if self._ros_initialized:
             return
 
         rospy.loginfo("[Env] Initialising ROS node...")
-        # Only init node if not already running (allows external init)
+        # 仅在尚未初始化时创建节点（允许外部先初始化）
         if not rospy.core.is_initialized():
             rospy.init_node("explorllm_env", anonymous=True)
 
-        # MoveIt commanders
+        # MoveIt 控制组
         moveit_commander.roscpp_initialize(sys.argv)
         self._moveit_arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
         self._moveit_gripper = moveit_commander.MoveGroupCommander("sagittarius_gripper")
 
-        # Tolerances & speed
+        # 位姿容差与速度
         self._moveit_arm.set_goal_position_tolerance(0.005)
         self._moveit_arm.set_goal_orientation_tolerance(0.02)
         self._moveit_arm.set_max_velocity_scaling_factor(0.4)
@@ -175,11 +172,11 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         self._moveit_gripper.set_max_acceleration_scaling_factor(0.5)
 
-        # Subscribe to Gazebo model states (ground-truth positions)
+        # 订阅 Gazebo 模型状态（真值位置）
         rospy.Subscriber("/gazebo/model_states", ModelStates,
                          self._model_states_cb, queue_size=1)
 
-        # Subscribe to camera image (for crop extraction at eval time)
+        # 订阅相机图像（评估时用于裁剪）
         try:
             from sensor_msgs.msg import Image
             from cv_bridge import CvBridge
@@ -193,12 +190,12 @@ class SagittariusPickPlaceEnv(gym.Env):
             self._bridge = None
             self._latest_image = None
 
-        # Gazebo services
+        # Gazebo 服务
         rospy.wait_for_service("/gazebo/set_model_state", timeout=10)
         self._set_model_state = rospy.ServiceProxy(
             "/gazebo/set_model_state", SetModelState)
 
-        # Unpause physics if paused
+        # 若物理仿真暂停则恢复
         rospy.wait_for_service("/gazebo/unpause_physics", timeout=5)
         unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
         try:
@@ -220,12 +217,12 @@ class SagittariusPickPlaceEnv(gym.Env):
             except Exception:
                 pass
 
-    # ── Gazebo object management ───────────────────────────────────────────────
+    # ── Gazebo 物体管理 ───────────────────────────────────────────────────────
 
     def _get_object_pose(self, name: str) -> np.ndarray:
         """
-        Return (x, y, z) of named object from latest ModelStates.
-        Returns zeros if object not found.
+        从最新 ModelStates 中取指定物体的 (x, y, z)。
+        若未找到则返回零向量。
         """
         if self._model_states is None:
             return np.zeros(3, dtype=np.float32)
@@ -238,13 +235,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             return np.zeros(3, dtype=np.float32)
 
     def _randomize_objects(self):
-        """Teleport blocks to random positions on the table; bowls to fixed zones."""
+        """将块随机传送到桌面上；碗放在固定区域。"""
         rng = np.random.default_rng()
 
-        # Randomise block positions (with collision avoidance: min 8cm apart)
+        # 随机块位置（防碰撞：至少相距 8cm）
         placed = []
         for name in BLOCK_NAMES:
-            for _ in range(50):  # max attempts
+            for _ in range(50):  # 最大尝试次数
                 x = rng.uniform(TABLE_X_MIN + 0.05, TABLE_X_MAX - 0.05)
                 y = rng.uniform(TABLE_Y_MIN + 0.05, TABLE_Y_MAX - 0.05)
                 if all(np.linalg.norm([x - px, y - py]) > 0.08
@@ -253,7 +250,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                     self._teleport(name, x, y, TABLE_Z + 0.02)
                     break
 
-        # Bowls at fixed positions (outside block randomisation zone)
+        # 碗固定在指定位置（在块随机区域之外）
         bowl_positions = [
             (0.35, -0.15, TABLE_Z),   # red bowl
             (0.35,  0.00, TABLE_Z),   # green bowl
@@ -263,7 +260,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             self._teleport(name, x, y, z)
 
     def _teleport(self, name: str, x: float, y: float, z: float):
-        """Move a Gazebo model to (x,y,z) instantly."""
+        """将 Gazebo 模型瞬间移动到 (x,y,z)。"""
         state = ModelState()
         state.model_name = name
         state.pose.position.x = x
@@ -276,12 +273,12 @@ class SagittariusPickPlaceEnv(gym.Env):
         except rospy.ServiceException as e:
             rospy.logwarn(f"[Env] Teleport failed for {name}: {e}")
 
-    # ── Observation building ───────────────────────────────────────────────────
+    # ── 观测构建 ───────────────────────────────────────────────────────────────
 
     def _get_positions_with_noise(self) -> np.ndarray:
         """
-        Returns (N_total, 2) array of x,y positions with Gaussian noise.
-        This simulates real-camera detection uncertainty during training.
+        返回带高斯噪声的 (N_total, 2) 的 x,y 位置数组。
+        用于训练时模拟真实相机检测不确定性。
         """
         positions = []
         for name in ALL_OBJECTS:
@@ -292,14 +289,14 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _get_image_crops(self, positions: np.ndarray) -> np.ndarray:
         """
-        Extract 28x28 RGB crops around each object position.
-        Falls back to blank crops if camera image unavailable.
+        在每个物体位置周围裁出 28x28 的 RGB 块。
+        若无相机图像则使用空白块。
 
         Args:
-            positions: (N_total, 2) object positions in robot frame
+            positions: (N_total, 2) 机器人坐标系下的物体位置
 
         Returns:
-            crops: (N_total, 3, 28, 28) float32 in [0,1]
+            crops: (N_total, 3, 28, 28) float32，取值 [0,1]
         """
         import cv2
         crops = []
@@ -307,9 +304,9 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         for i, name in enumerate(ALL_OBJECTS):
             if img is not None:
-                # Project robot-frame (x,y) to image pixel (u,v)
-                # This uses the calibration from Lab2's camera_calibration_hsv
-                # For training we use a simple perspective approximation
+                # 将机器人坐标系 (x,y) 投影到图像像素 (u,v)
+                # 使用 Lab2 camera_calibration_hsv 的标定结果
+                # 训练时采用简单透视近似
                 u, v = self._robot_to_pixel(positions[i])
                 h, w = img.shape[:2]
                 u, v = int(np.clip(u, 14, w-14)), int(np.clip(v, 14, h-14))
@@ -319,29 +316,27 @@ class SagittariusPickPlaceEnv(gym.Env):
                 crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                 crop = crop.astype(np.float32) / 255.0
             else:
-                # Blank crop during pure Gazebo training (no camera needed)
+                # 纯 Gazebo 训练无相机时使用空白块
                 crop = np.zeros((28, 28, 3), dtype=np.float32)
 
-            # (H,W,C) → (C,H,W) for PyTorch convention
+            # (H,W,C) → (C,H,W) 符合 PyTorch 约定
             crops.append(crop.transpose(2, 0, 1))
 
         return np.array(crops, dtype=np.float32)  # (N_total, 3, 28, 28)
 
     def _robot_to_pixel(self, xy: np.ndarray):
         """
-        Convert robot-frame (x,y) to camera pixel (u,v).
-        Uses linear regression coefficients from Lab2 calibration.
-        Replace with your actual calibrated values after running
-        camera_calibration_hsv.launch.
+        将机器人坐标系 (x,y) 转换为相机像素 (u,v)。
+        使用 Lab2 标定得到的线性回归系数。
+        运行 camera_calibration_hsv.launch 后请替换为实际标定值。
 
-        Placeholder: assumes a top-down camera at ~60cm height.
+        占位：假设俯视相机约 60cm 高度。
         """
-        # These values come from the k,b output of the calibration script.
-        # After running Lab2 calibration, replace with vision_config.yaml values.
+        # 以下为标定脚本输出的 k,b，运行 Lab2 标定后请用 vision_config.yaml 中的值替换
         kx, bx = -0.00029, 0.31084   # x_robot = kx*v_pixel + bx
         ky, by =  0.00030, 0.09080   # y_robot = ky*u_pixel + by
 
-        # Invert to get pixel from robot coords
+        # 反解得到从机器人坐标到像素
         if abs(kx) > 1e-9:
             v = (xy[0] - bx) / kx
         else:
@@ -354,7 +349,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_lang_onehot(self) -> np.ndarray:
         """
-        Build 6-dim one-hot: [pick_r, pick_g, pick_b, place_r, place_g, place_b]
+        构建 6 维 one-hot：[pick_r, pick_g, pick_b, place_r, place_g, place_b]
         """
         vec = np.zeros(N_OBJECTS + N_TARGETS, dtype=np.float32)
         if self.pick_color  in COLOR_INDEX:
@@ -365,8 +360,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_observation(self) -> np.ndarray:
         """
-        Assemble full flat observation vector.
-        Layout: [img_patches | positions | gripper | lang]
+        组装完整的扁平观测向量。
+        布局: [img_patches | positions | gripper | lang]
         """
         positions = self._get_positions_with_noise()    # (N_total, 2)
         crops     = self._get_image_crops(positions)    # (N_total, 3, 28, 28)
@@ -382,7 +377,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         ]).astype(np.float32)
         return obs
 
-    # ── MoveIt motion primitives ───────────────────────────────────────────────
+    # ── MoveIt 运动原语 ───────────────────────────────────────────────────────
 
     def _open_gripper(self):
         self._moveit_gripper.set_named_target("open")
@@ -399,8 +394,8 @@ class SagittariusPickPlaceEnv(gym.Env):
     def _move_to_pose(self, x: float, y: float, z: float,
                       qx=0.0, qy=0.0, qz=0.0, qw=1.0) -> bool:
         """
-        Move arm end-effector to Cartesian pose (x,y,z) + quaternion.
-        Returns True if plan + execution succeeded.
+        将机械臂末端移动到笛卡尔位姿 (x,y,z) 及四元数。
+        规划并执行成功返回 True。
         """
         target = PoseStamped()
         target.header.frame_id = "world"
@@ -424,32 +419,32 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _execute_pick(self, x: float, y: float) -> bool:
         """
-        Full pick primitive:
-          1. Open gripper
-          2. Move above target (approach height)
-          3. Descend to grasp height
-          4. Close gripper
-          5. Lift back up
-        Returns True if all steps succeeded.
+        完整抓取原语：
+          1. 张开夹爪
+          2. 移动到目标上方（approach 高度）
+          3. 下到抓取高度
+          4. 闭合夹爪
+          5. 抬回
+        全部成功返回 True。
         """
         self._open_gripper()
 
-        # Approach from above
+        # 从上方接近
         ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
         if not ok:
             rospy.logwarn("[Env] Pick approach planning failed.")
             return False
 
-        # Descend
+        # 下降
         ok = self._move_to_pose(x, y, TABLE_Z + GRASP_HEIGHT)
         if not ok:
             rospy.logwarn("[Env] Pick descend planning failed.")
             return False
 
-        # Grasp
+        # 抓取
         self._close_gripper()
 
-        # Lift
+        # 抬起
         ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
         if not ok:
             rospy.logwarn("[Env] Pick lift planning failed.")
@@ -459,35 +454,35 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _execute_place(self, x: float, y: float) -> bool:
         """
-        Full place primitive:
-          1. Move above target bowl (approach height)
-          2. Descend to place height
-          3. Open gripper
-          4. Lift back up
-        Returns True if all steps succeeded.
+        完整放置原语：
+          1. 移动到目标碗上方（approach 高度）
+          2. 下到放置高度
+          3. 张开夹爪
+          4. 抬回
+        全部成功返回 True。
         """
-        # Move above bowl
+        # 移动到碗上方
         ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
         if not ok:
             rospy.logwarn("[Env] Place approach planning failed.")
             return False
 
-        # Descend slightly
+        # 略下降
         ok = self._move_to_pose(x, y, TABLE_Z + PLACE_HEIGHT)
         if not ok:
             rospy.logwarn("[Env] Place descend planning failed.")
             return False
 
-        # Release
+        # 释放
         self._open_gripper()
 
-        # Lift
+        # 抬起
         self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
 
         return True
 
     def _return_home(self):
-        """Return arm to safe 'Home' named pose."""
+        """将机械臂回到安全的 'Home' 命名位姿。"""
         try:
             self._moveit_arm.set_named_target("Home")
             self._moveit_arm.go(wait=True)
@@ -495,56 +490,56 @@ class SagittariusPickPlaceEnv(gym.Env):
         except Exception as e:
             rospy.logwarn(f"[Env] Failed to return home: {e}")
 
-    # ── Reward computation ────────────────────────────────────────────────────
+    # ── 奖励计算 ───────────────────────────────────────────────────────────────
 
     def _compute_reward(self, primitive: int, obj_idx: int,
                         action_xy: np.ndarray,
                         success: bool) -> float:
         """
-        Reward = dense distance component + sparse success component.
+        奖励 = 稠密距离项 + 稀疏成功项。
 
-        Dense: negative distance from end-effector to target (encourages progress)
-        Sparse: +1.0 if block is inside correct bowl after place action
+        稠密：末端到目标的负距离（鼓励靠近）
+        稀疏：放置后块在正确碗内则 +1.0
         """
         r = 0.0
 
         if primitive == 0:  # pick
-            # Dense: reward for moving toward the target block
+            # 稠密：朝目标块移动给奖励
             target_name = BLOCK_NAMES[obj_idx % N_OBJECTS]
             target_pos  = self._get_object_pose(target_name)[:2]
             dist = np.linalg.norm(action_xy - target_pos)
-            r += -dist  # closer is better
+            r += -dist  # 越近越好
 
         elif primitive == 1:  # place
-            # Dense: reward for proximity to correct bowl
+            # 稠密：靠近目标碗给奖励
             bowl_name  = f"{self.place_color}_bowl"
             bowl_pos   = self._get_object_pose(bowl_name)[:2]
             dist = np.linalg.norm(action_xy - bowl_pos)
             r += -dist
 
-            # Sparse: check if block is inside the bowl
+            # 稀疏：检查块是否在碗内
             if success:
                 block_name = f"{self.pick_color}_block"
                 block_pos  = self._get_object_pose(block_name)[:2]
                 bowl_pos2  = self._get_object_pose(bowl_name)[:2]
                 if np.linalg.norm(block_pos - bowl_pos2) < 0.05:
-                    r += 1.0  # task success!
+                    r += 1.0  # 任务成功
 
         if not success:
-            r -= 0.2  # penalty for motion planning failure
+            r -= 0.2  # 运动规划失败惩罚
 
         return float(r)
 
     def _check_task_done(self) -> bool:
-        """Return True if the episode-level task goal is completed."""
+        """若 episode 级任务目标已完成则返回 True。"""
         if self.task == "short_horizon":
-            # Done when pick_color block is inside place_color bowl
+            # 当 pick_color 块进入 place_color 碗时视为完成
             block_pos = self._get_object_pose(f"{self.pick_color}_block")[:2]
             bowl_pos  = self._get_object_pose(f"{self.place_color}_bowl")[:2]
             return np.linalg.norm(block_pos - bowl_pos) < 0.05
 
         elif self.task == "long_horizon":
-            # Done when all blocks are in their matching bowls
+            # 当所有块都在对应颜色的碗内时完成
             for color in ["red", "green", "blue"]:
                 block_pos = self._get_object_pose(f"{color}_block")[:2]
                 bowl_pos  = self._get_object_pose(f"{color}_bowl")[:2]
@@ -558,19 +553,19 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         """
-        Reset episode:
-          1. Randomise object positions in Gazebo
-          2. Sample a new language goal
-          3. Return home
-          4. Build initial observation
+        重置 episode：
+          1. 在 Gazebo 中随机物体位置
+          2. 采样新的语言目标
+          3. 机械臂回 Home
+          4. 构建初始观测
         """
         super().reset(seed=seed)
-        self._init_ros()  # no-op after first call
+        self._init_ros()  # 首次之后调用为 no-op
 
         self._step_count = 0
         self._gripper_open = True
 
-        # Sample language goal
+        # 采样语言目标
         rng = np.random.default_rng(seed)
         colors = list(COLOR_INDEX.keys())
         if self.task == "short_horizon":
@@ -578,15 +573,15 @@ class SagittariusPickPlaceEnv(gym.Env):
             remaining = [c for c in colors if c != self.pick_color]
             self.place_color = rng.choice(remaining)
         else:
-            # long_horizon: all blocks to matching bowls
+            # long_horizon：所有块放入对应颜色碗
             self.pick_color  = None
             self.place_color = None
 
-        # Randomise Gazebo scene
+        # 随机化 Gazebo 场景
         self._randomize_objects()
-        time.sleep(0.5)  # let Gazebo settle physics
+        time.sleep(0.5)  # 等待 Gazebo 物理稳定
 
-        # Return arm to home
+        # 机械臂回 Home
         self._return_home()
 
         obs  = self._build_observation()
@@ -599,7 +594,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         """
-        Execute one primitive action.
+        执行一个原语动作。
 
         Args:
             action: [primitive(0-1), obj_index(0-5), res_x, res_y]
@@ -609,12 +604,12 @@ class SagittariusPickPlaceEnv(gym.Env):
         """
         self._step_count += 1
 
-        # Decode action
+        # 解析动作
         primitive = int(np.round(np.clip(action[0], 0, 1)))
         obj_idx   = int(np.round(np.clip(action[1], 0, N_TOTAL - 1)))
         res_xy    = np.clip(action[2:4], -0.05, 0.05)
 
-        # Get object position (noisy) as base, add residual
+        # 以带噪的物体位置为基准，加上残差得到目标点
         positions = self._get_positions_with_noise()
         base_xy   = positions[obj_idx]
         target_xy = base_xy + res_xy
@@ -622,20 +617,20 @@ class SagittariusPickPlaceEnv(gym.Env):
                             [TABLE_X_MIN, TABLE_Y_MIN],
                             [TABLE_X_MAX, TABLE_Y_MAX])
 
-        # Execute primitive
+        # 执行原语
         if primitive == 0:
             success = self._execute_pick(target_xy[0], target_xy[1])
         else:
             success = self._execute_place(target_xy[0], target_xy[1])
 
-        # Compute reward
+        # 计算奖励
         reward = self._compute_reward(primitive, obj_idx, target_xy, success)
 
-        # Check termination
+        # 判断是否结束
         terminated = self._check_task_done()
         truncated  = self._step_count >= self.max_steps
 
-        # Rebuild observation
+        # 重新构建观测
         obs = self._build_observation()
 
         info = {
@@ -648,7 +643,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def close(self):
-        """Cleanup MoveIt and ROS resources."""
+        """释放 MoveIt 与 ROS 资源。"""
         if self._ros_initialized:
             try:
                 self._return_home()

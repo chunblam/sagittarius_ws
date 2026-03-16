@@ -3,21 +3,21 @@
 """
 eval.py
 =======
-Evaluation script for trained ExploRLLM policies.
+已训练 ExploRLLM 策略的评估脚本。
 
-Modes:
-  1. Evaluate saved model on Gazebo  (no camera)
-  2. Evaluate on real robot with camera  (sim-to-real demo)
-  3. Plot training curves from log files
+模式：
+  1. 在 Gazebo 中评估已保存模型（无需相机）
+  2. 在真实机械臂上用相机评估（sim-to-real 演示）
+  3. 根据日志绘制训练曲线
 
-Usage:
-    # Evaluate a saved model
+用法：
+    # 评估已保存模型
     python eval.py --model-path logs/eps0.2_seed0/final_model.zip --n-episodes 30
 
-    # Real robot demo with camera
+    # 真实机械臂 + 相机演示
     python eval.py --model-path logs/eps0.2_seed0/final_model.zip --real-robot
 
-    # Plot training curves (ablation)
+    # 绘制训练曲线（ablation）
     python eval.py --plot --log-dir logs/
 """
 
@@ -48,10 +48,10 @@ def get_args():
     return p.parse_args()
 
 
-# ── Simulation evaluation ─────────────────────────────────────────────────────
+# ── 仿真评估 ─────────────────────────────────────────────────────────────────
 
 def eval_sim(model_path: str, n_episodes: int, task: str):
-    """Evaluate a saved model in Gazebo simulation."""
+    """在 Gazebo 仿真中评估已保存的模型。"""
     import rospy
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC
@@ -123,16 +123,16 @@ def eval_sim(model_path: str, n_episodes: int, task: str):
     return results
 
 
-# ── Real robot evaluation (sim-to-real) ───────────────────────────────────────
+# ── 真实机械臂评估（sim-to-real）─────────────────────────────────────────────
 
 def eval_real_robot(model_path: str, n_episodes: int, task: str):
     """
-    Evaluate on real Sagittarius arm using camera for perception.
+    在真实 Sagittarius 机械臂上用相机感知进行评估。
 
-    This replaces the Gazebo GT positions with camera detections
-    from the HSV color detector (Lab2's sagittarius_object_color_detector).
+    用 HSV 颜色检测（Lab2 sagittarius_object_color_detector）的相机检测
+    替代 Gazebo 真值位置。
 
-    Requires:
+    需先启动：
         roslaunch sagittarius_moveit demo_true.launch
         roslaunch sagittarius_object_color_detector color_classification_fixed.launch
     """
@@ -148,17 +148,17 @@ def eval_real_robot(model_path: str, n_episodes: int, task: str):
     model      = ExploRLLMSAC.load(model_path)
     camera     = CameraPerception()
 
-    # Use sim env but override perception with camera
+    # 使用仿真 env，但可用相机感知覆盖（当前为占位）
     env = SagittariusPickPlaceEnv(task=task, max_steps=10)
 
     def camera_perception_override(obs_arr):
-        """Replace Gazebo GT positions with real camera detections."""
+        """用真实相机检测结果替换 Gazebo 真值位置。"""
         detected = camera.get_object_positions()
-        # Map detected positions back into obs array
-        # This replaces the position part of the observation
-        pos_start = env.observation_space.shape[0]  # end of img section
-        # (Implementation depends on camera calibration)
-        return obs_arr  # placeholder: return unmodified for now
+        # 将检测位置写回 obs 数组中的位置区段
+        # 具体实现依赖相机标定与观测布局
+        pos_start = env.observation_space.shape[0]  # 图像区段结束位置
+        # 占位：目前直接返回未修改的 obs
+        return obs_arr
 
     print("[RealEval] Starting real robot evaluation.")
     print("[RealEval] Make sure arm is powered on and demo_true.launch is running.")
@@ -179,7 +179,7 @@ def eval_real_robot(model_path: str, n_episodes: int, task: str):
         done = truncated = False
 
         while not (done or truncated):
-            # Optionally override with camera perception here
+            # 此处可选用相机感知覆盖 obs 后再 predict
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, truncated, info = env.step(action)
             ep_reward += reward
@@ -197,14 +197,14 @@ def eval_real_robot(model_path: str, n_episodes: int, task: str):
     return {"success_rate": success_rate, "mean_reward": float(np.mean(rewards))}
 
 
-# ── Training curve plotting ────────────────────────────────────────────────────
+# ── 训练曲线绘制 ──────────────────────────────────────────────────────────────
 
 def plot_training_curves(log_dir: str, output_dir: str):
     """
-    Plot training reward curves for all runs in log_dir.
-    Groups runs by epsilon value, computes mean ± std over seeds.
+    绘制 log_dir 下所有运行的训练奖励曲线。
+    按 epsilon 分组，对多种子求 mean ± std。
 
-    Saves: training_curves.png
+    输出：training_curves.png
     """
     try:
         import matplotlib.pyplot as plt
@@ -218,8 +218,8 @@ def plot_training_curves(log_dir: str, output_dir: str):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect all training logs
-    runs = {}  # epsilon_str → list of [(steps, reward)] arrays
+    # 收集所有训练日志
+    runs = {}  # epsilon_str → [(steps, reward)] 列表
     for log_file in sorted(log_dir.rglob("training_log.json")):
         try:
             with open(log_file) as f:
@@ -232,7 +232,7 @@ def plot_training_curves(log_dir: str, output_dir: str):
             steps   = [e["step"]   for e in episodes]
             rewards = [e["reward"] for e in episodes]
 
-            # Smooth with rolling window
+            # 滑动窗口平滑
             window = 50
             rewards_smooth = np.convolve(
                 rewards, np.ones(window)/window, mode="valid")
@@ -253,7 +253,7 @@ def plot_training_curves(log_dir: str, output_dir: str):
 
     for key, seed_runs in sorted(runs.items()):
         color = colors.get(key, "#333333")
-        # Align all seeds to same step axis (interpolate)
+        # 将多种子对齐到同一步数轴（插值）
         max_steps = max(r[0][-1] for r in seed_runs)
         common_steps = np.linspace(0, max_steps, 200)
         interp_rewards = []
@@ -271,9 +271,9 @@ def plot_training_curves(log_dir: str, output_dir: str):
                         mean - std, mean + std,
                         alpha=0.2, color=color)
 
-    ax.set_xlabel("Environment steps (×10³)", fontsize=12)
-    ax.set_ylabel("Episode reward (smoothed)", fontsize=12)
-    ax.set_title("ExploRLLM Training Curves — Sagittarius SGR532", fontsize=13)
+    ax.set_xlabel("环境步数 (×10³)", fontsize=12)
+    ax.set_ylabel("Episode 奖励（平滑）", fontsize=12)
+    ax.set_title("ExploRLLM 训练曲线 — Sagittarius SGR532", fontsize=13)
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -284,7 +284,7 @@ def plot_training_curves(log_dir: str, output_dir: str):
     plt.close()
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── 入口 ───────────────────────────────────────────────────────────────────
 
 def main():
     args = get_args()
@@ -307,7 +307,7 @@ def main():
         results = eval_sim(
             args.model_path, args.n_episodes, args.task)
 
-    # Save results
+    # 保存评估结果
     results_path = output_dir / "eval_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
