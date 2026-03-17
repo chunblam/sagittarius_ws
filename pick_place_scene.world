@@ -1,330 +1,215 @@
 <?xml version="1.0" ?>
 <!--
   pick_place_scene.world
-  ======================
-  ExploRLLM 抓取-放置场景的 Gazebo 世界文件。
+  =========================
+  升级版Gazebo场景：6种颜色的方块 + 6种颜色的垃圾桶（共12个物体）
 
-  场景内容：
-    - 3 个彩色方块（红/绿/蓝），约 5cm 立方体
-    - 3 个彩色垃圾桶（红/绿/蓝），约直径 7cm × 高 9cm
+  颜色：red / green / blue / yellow / pink / orange
 
-  使用方法：
-    在 sagittarius_gazebo 的 launch 中替换或包含本文件。
-    最简单做法：将下面各 <model> 块复制到现有 .world 文件内（<world> 标签内），
-    或在 launch 中引用本文件：
+  重要：
+    - 方块和垃圾桶的初始位置只是spawn位置
+    - 训练时 _randomize_scene() 会每个episode把它们传送到随机位置
+    - 物体名称必须和 color_config.py 里的 DEFAULT_COLORS 对应
+      命名约定：{color}_block, {color}_bin
 
-      <arg name="world_name" value="$(find sagittarius_gazebo)/worlds/pick_place_scene.world"/>
-
-  重要：模型名（red_block、green_block 等）必须与 pick_place_env.py 中
-  BLOCK_NAMES / BOWL_NAMES 完全一致。
+  如何加入已有的world文件：
+    把本文件里所有的 <model> 标签复制进你的 demo_gazebo.world
+    的 <world> 标签内即可。
 -->
 <sdf version="1.6">
 <world name="default">
+  <include><uri>model://sun</uri></include>
+  <include><uri>model://ground_plane</uri></include>
 
-  <!-- ── Lighting ────────────────────────────────────────────────────── -->
-  <include>
-    <uri>model://sun</uri>
-  </include>
-
-  <!-- ── Ground plane ────────────────────────────────────────────────── -->
-  <include>
-    <uri>model://ground_plane</uri>
-  </include>
-
-  <!-- ══════════════════════════════════════════════════════════════════
-       工作台  (简单扁盒，表示工作平面)
-       位置：机械臂基座前方，z=0 时顶面在 table_z；可调 x/y/z 以匹配实际桌子。
-  ══════════════════════════════════════════════════════════════════════ -->
+  <!-- 工作台 -->
   <model name="workspace_table">
     <static>true</static>
     <pose>0.28 0.0 -0.025 0 0 0</pose>
     <link name="link">
-      <visual name="visual">
-        <geometry>
-          <box><size>0.50 0.50 0.05</size></box>
-        </geometry>
-        <material>
-          <ambient>0.85 0.82 0.75 1</ambient>
-          <diffuse>0.85 0.82 0.75 1</diffuse>
-        </material>
+      <visual name="v"><geometry><box><size>0.55 0.55 0.05</size></box></geometry>
+        <material><ambient>0.85 0.82 0.75 1</ambient><diffuse>0.85 0.82 0.75 1</diffuse></material>
       </visual>
-      <collision name="collision">
-        <geometry>
-          <box><size>0.50 0.50 0.05</size></box>
-        </geometry>
-      </collision>
+      <collision name="c"><geometry><box><size>0.55 0.55 0.05</size></box></geometry></collision>
     </link>
   </model>
 
-  <!-- ══════════════════════════════════════════════════════════════════
-       彩色方块  (5 cm × 5 cm × 4 cm 方盒)
-       初始位置在“源区”（中心偏左）。环境的 _randomize_objects() 会在每 episode
-       传送它们，因此这里仅是生成位置。
+  <!-- ══════════════ 方块 (5cm × 5cm × 4cm) ══════════════ -->
 
-       尺寸与实验室泡沫/塑料方块一致（边长约 5cm，高度略短 4cm）。
-  ══════════════════════════════════════════════════════════════════════ -->
-
-  <!-- RED block -->
   <model name="red_block">
-    <pose>0.22 -0.06 0.02 0 0 0</pose>
+    <pose>0.18 -0.12 0.02 0 0 0</pose>
     <link name="link">
-      <inertial>
-        <mass>0.05</mass>
-        <inertia>
-          <ixx>0.000014</ixx><ixy>0</ixy><ixz>0</ixz>
-          <iyy>0.000014</iyy><iyz>0</iyz>
-          <izz>0.000021</izz>
-        </inertia>
-      </inertial>
-      <visual name="visual">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <material>
-          <!-- Bright red -->
-          <ambient>0.9 0.1 0.1 1</ambient>
-          <diffuse>0.9 0.1 0.1 1</diffuse>
-          <specular>0.2 0.2 0.2 1</specular>
-        </material>
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.9 0.1 0.1 1</ambient><diffuse>0.9 0.1 0.1 1</diffuse></material>
       </visual>
-      <collision name="collision">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <surface>
-          <friction>
-            <ode><mu>0.8</mu><mu2>0.8</mu2></ode>
-          </friction>
-        </surface>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
       </collision>
     </link>
   </model>
 
-  <!-- GREEN block -->
   <model name="green_block">
-    <pose>0.26 0.04 0.02 0 0 0</pose>
+    <pose>0.22 -0.04 0.02 0 0 0</pose>
     <link name="link">
-      <inertial>
-        <mass>0.05</mass>
-        <inertia>
-          <ixx>0.000014</ixx><ixy>0</ixy><ixz>0</ixz>
-          <iyy>0.000014</iyy><iyz>0</iyz>
-          <izz>0.000021</izz>
-        </inertia>
-      </inertial>
-      <visual name="visual">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <material>
-          <!-- Bright green -->
-          <ambient>0.1 0.8 0.15 1</ambient>
-          <diffuse>0.1 0.8 0.15 1</diffuse>
-          <specular>0.2 0.2 0.2 1</specular>
-        </material>
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.1 0.8 0.15 1</ambient><diffuse>0.1 0.8 0.15 1</diffuse></material>
       </visual>
-      <collision name="collision">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <surface>
-          <friction>
-            <ode><mu>0.8</mu><mu2>0.8</mu2></ode>
-          </friction>
-        </surface>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
       </collision>
     </link>
   </model>
 
-  <!-- BLUE block -->
   <model name="blue_block">
-    <pose>0.22 0.10 0.02 0 0 0</pose>
+    <pose>0.18 0.06 0.02 0 0 0</pose>
     <link name="link">
-      <inertial>
-        <mass>0.05</mass>
-        <inertia>
-          <ixx>0.000014</ixx><ixy>0</ixy><ixz>0</ixz>
-          <iyy>0.000014</iyy><iyz>0</iyz>
-          <izz>0.000021</izz>
-        </inertia>
-      </inertial>
-      <visual name="visual">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <material>
-          <!-- Bright blue -->
-          <ambient>0.1 0.2 0.9 1</ambient>
-          <diffuse>0.1 0.2 0.9 1</diffuse>
-          <specular>0.2 0.2 0.2 1</specular>
-        </material>
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.1 0.2 0.9 1</ambient><diffuse>0.1 0.2 0.9 1</diffuse></material>
       </visual>
-      <collision name="collision">
-        <geometry>
-          <box><size>0.05 0.05 0.04</size></box>
-        </geometry>
-        <surface>
-          <friction>
-            <ode><mu>0.8</mu><mu2>0.8</mu2></ode>
-          </friction>
-        </surface>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
       </collision>
     </link>
   </model>
 
-  <!-- ══════════════════════════════════════════════════════════════════
-       垃圾桶  (圆柱、敞口)
+  <model name="yellow_block">
+    <pose>0.24 0.14 0.02 0 0 0</pose>
+    <link name="link">
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.95 0.9 0.05 1</ambient><diffuse>0.95 0.9 0.05 1</diffuse></material>
+      </visual>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+      </collision>
+    </link>
+  </model>
 
-       实验室实物（参考 Lab2 照片）：
-         - 外径约 7 cm → 半径 0.035 m
-         - 高度约 9 cm
-         - 壁厚约 0.5 cm
+  <model name="pink_block">
+    <pose>0.20 -0.16 0.02 0 0 0</pose>
+    <link name="link">
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.95 0.4 0.7 1</ambient><diffuse>0.95 0.4 0.7 1</diffuse></material>
+      </visual>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+      </collision>
+    </link>
+  </model>
 
-       建模为静态空心圆柱（仅外壁）。空心通过薄壁圆柱碰撞体近似，
-       Gazebo 做 RL 不需要真正空心网格，方块只需能落入半径内即可。
+  <model name="orange_block">
+    <pose>0.26 0.0 0.02 0 0 0</pose>
+    <link name="link">
+      <inertial><mass>0.05</mass></inertial>
+      <visual name="v"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <material><ambient>0.95 0.5 0.05 1</ambient><diffuse>0.95 0.5 0.05 1</diffuse></material>
+      </visual>
+      <collision name="c"><geometry><box><size>0.05 0.05 0.04</size></box></geometry>
+        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+      </collision>
+    </link>
+  </model>
 
-       桶为静态（固定），放在桌子右半侧。位置必须与 camera_perception.py 中
-       bowl_positions_fixed 以及 pick_place_env.py 中 _randomize_objects() 一致。
+  <!-- ══════════════ 垃圾桶 (圆柱体, r=3.8cm, h=9cm) ══════════════
+       桶是STATIC：因为它们是目标，不需要被物理引擎移动。
+       训练时通过set_model_state传送到随机位置（static物体也可以被传送）。
+  ══════════════ -->
 
-       当前位置（机械臂基座坐标系）：
-         red_bowl  : x=0.35, y=-0.15
-         green_bowl: x=0.35, y= 0.00
-         blue_bowl : x=0.35, y= 0.15
-  ══════════════════════════════════════════════════════════════════════ -->
-
-  <!-- RED trash bin -->
-  <model name="red_bowl">
+  <model name="red_bin">
     <static>true</static>
     <pose>0.35 -0.15 0.0 0 0 0</pose>
-    <link name="bin_body">
-      <visual name="outer_visual">
-        <geometry>
-          <!-- Outer wall of bin -->
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.85 0.08 0.08 1</ambient>
-          <diffuse>0.85 0.08 0.08 1</diffuse>
-          <specular>0.3 0.3 0.3 1</specular>
-        </material>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
       </visual>
-      <!-- Collision: solid cylinder (blocks land on top or inside) -->
-      <collision name="outer_collision">
-        <geometry>
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-      </collision>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
     </link>
-
-    <!-- Inner cutout visual (dark interior) -->
-    <link name="bin_interior">
-      <pose>0 0 0.005 0 0 0</pose>
-      <visual name="inner_visual">
-        <geometry>
-          <cylinder>
-            <radius>0.030</radius>
-            <length>0.080</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.12 0.02 0.02 1</ambient>
-          <diffuse>0.12 0.02 0.02 1</diffuse>
-        </material>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.12 0.02 0.02 1</ambient><diffuse>0.12 0.02 0.02 1</diffuse></material>
       </visual>
-      <!-- No collision on inner: blocks fall in -->
     </link>
   </model>
 
-  <!-- GREEN trash bin -->
-  <model name="green_bowl">
+  <model name="green_bin">
     <static>true</static>
     <pose>0.35 0.00 0.0 0 0 0</pose>
-    <link name="bin_body">
-      <visual name="outer_visual">
-        <geometry>
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.08 0.75 0.12 1</ambient>
-          <diffuse>0.08 0.75 0.12 1</diffuse>
-          <specular>0.3 0.3 0.3 1</specular>
-        </material>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
       </visual>
-      <collision name="outer_collision">
-        <geometry>
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-      </collision>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
     </link>
-    <link name="bin_interior">
-      <pose>0 0 0.005 0 0 0</pose>
-      <visual name="inner_visual">
-        <geometry>
-          <cylinder>
-            <radius>0.030</radius>
-            <length>0.080</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.02 0.12 0.02 1</ambient>
-          <diffuse>0.02 0.12 0.02 1</diffuse>
-        </material>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.02 0.12 0.02 1</ambient><diffuse>0.02 0.12 0.02 1</diffuse></material>
       </visual>
     </link>
   </model>
 
-  <!-- BLUE trash bin -->
-  <model name="blue_bowl">
+  <model name="blue_bin">
     <static>true</static>
     <pose>0.35 0.15 0.0 0 0 0</pose>
-    <link name="bin_body">
-      <visual name="outer_visual">
-        <geometry>
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.08 0.15 0.85 1</ambient>
-          <diffuse>0.08 0.15 0.85 1</diffuse>
-          <specular>0.3 0.3 0.3 1</specular>
-        </material>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
       </visual>
-      <collision name="outer_collision">
-        <geometry>
-          <cylinder>
-            <radius>0.038</radius>
-            <length>0.090</length>
-          </cylinder>
-        </geometry>
-      </collision>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
     </link>
-    <link name="bin_interior">
-      <pose>0 0 0.005 0 0 0</pose>
-      <visual name="inner_visual">
-        <geometry>
-          <cylinder>
-            <radius>0.030</radius>
-            <length>0.080</length>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>0.02 0.03 0.12 1</ambient>
-          <diffuse>0.02 0.03 0.12 1</diffuse>
-        </material>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.02 0.03 0.12 1</ambient><diffuse>0.02 0.03 0.12 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+
+  <model name="yellow_bin">
+    <static>true</static>
+    <pose>0.38 -0.08 0.0 0 0 0</pose>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
+      </visual>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
+    </link>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.12 0.12 0.02 1</ambient><diffuse>0.12 0.12 0.02 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+
+  <model name="pink_bin">
+    <static>true</static>
+    <pose>0.38 0.08 0.0 0 0 0</pose>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
+      </visual>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
+    </link>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.12 0.05 0.08 1</ambient><diffuse>0.12 0.05 0.08 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+
+  <model name="orange_bin">
+    <static>true</static>
+    <pose>0.36 -0.14 0.0 0 0 0</pose>
+    <link name="bin_outer">
+      <visual name="v"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry>
+        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse><specular>0.3 0.3 0.3 1</specular></material>
+      </visual>
+      <collision name="c"><geometry><cylinder><radius>0.038</radius><length>0.090</length></cylinder></geometry></collision>
+    </link>
+    <link name="bin_inner"><pose>0 0 0.005 0 0 0</pose>
+      <visual name="v"><geometry><cylinder><radius>0.030</radius><length>0.080</length></cylinder></geometry>
+        <material><ambient>0.12 0.06 0.02 1</ambient><diffuse>0.12 0.06 0.02 1</diffuse></material>
       </visual>
     </link>
   </model>
