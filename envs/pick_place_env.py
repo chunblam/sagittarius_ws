@@ -2,87 +2,83 @@
 # -*- coding: utf-8 -*-
 """
 pick_place_env.py
-=================
-Sagittarius 拾放任务的 Gazebo gym.Env 封装。
+====================
+升级版环境，相比原版的核心变化：
 
-本环境桥接：
-  - stable-baselines3（SAC 训练循环）
-  - ROS / MoveIt（运动执行）
-  - Gazebo（仿真状态与物理）
+  变化1：支持任意多种颜色（从color_config动态读取，不再写死3种）
+  变化2：垃圾桶位置随机（每次episode随机传送到桌面不同位置）
+  变化3：observation向量用颜色index代替one-hot（支持任意颜色数）
+  变化4：observation包含桶的位置（因为桶不再固定，必须告诉policy桶在哪）
 
-观测空间：
-  - image_patches : (N_obj, 3, 28, 28)  每个物体的 RGB 裁剪块
-  - obj_positions : (N_obj, 2)           带高斯噪声的 x,y 位置
-  - gripper_state : (1,)                 0=张开，1=闭合
-  - lang_goal     : (N_obj*2,)           抓取/放置目标的 one-hot 编码
+Observation向量新布局：
+  [img_patches | block_positions | bin_positions | gripper | task_encoding]
+   14112          N_COLORS*2        N_COLORS*2      1         2
 
-动作空间（残差、以物体为中心）：
-  - primitive  : int  0=抓取，1=放置
-  - obj_index  : int  对哪个物体操作
-  - residual_xy: (2,) 相对物体中心的偏移（米）
+  其中 task_encoding = [pick_color_idx, place_color_idx]，整数。
+
+Action向量不变：
+  [primitive(0-1), obj_index(0-2*N_COLORS-1), res_x, res_y]
+  obj_index 现在覆盖：前N_COLORS个 = 方块，后N_COLORS个 = 垃圾桶
 """
 
 import os
+import sys
 import time
-import math
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
 import rospy
 from gazebo_msgs.msg import ModelStates
-from gazebo_msgs.srv import SetModelState, SpawnModel, DeleteModel
+from gazebo_msgs.srv import SetModelState
 from gazebo_msgs.msg import ModelState
-from geometry_msgs.msg import Pose, Twist
 from std_srvs.srv import Empty
 
 import moveit_commander
-import moveit_msgs.msg
 from geometry_msgs.msg import PoseStamped
-import sys
+
+from configs.color_config import ColorConfig, get_color_config
 
 
-# ── 场景配置 ─────────────────────────────────────────────────────────────────
+# ── 场景参数 ──────────────────────────────────────────────────────────────────
 
-# Gazebo 中出现的物体名称
-BLOCK_NAMES  = ["red_block",   "green_block",  "blue_block"]
-BOWL_NAMES   = ["red_bowl",    "green_bowl",   "blue_bowl"]
-ALL_OBJECTS  = BLOCK_NAMES + BOWL_NAMES
+# 方块随机化区域（桌面左半部分）
+BLOCK_ZONE_X = (0.15, 0.30)
+BLOCK_ZONE_Y = (-0.18, 0.18)
 
-# 用于语言编码索引的颜色
-COLOR_INDEX  = {"red": 0, "green": 1, "blue": 2}
+# 垃圾桶随机化区域（桌面右半部分）
+BIN_ZONE_X   = (0.28, 0.40)
+BIN_ZONE_Y   = (-0.18, 0.18)
 
-# 桌面工作范围（米，机器人基坐标系）
-TABLE_X_MIN, TABLE_X_MAX = 0.15, 0.40
-TABLE_Y_MIN, TABLE_Y_MAX = -0.20, 0.20
-TABLE_Z = 0.02  # 桌面相对基座高度
+TABLE_Z       = 0.02   # 桌面高度
+BLOCK_H       = 0.04   # 方块高度
+BIN_H         = 0.09   # 垃圾桶高度（重心在 TABLE_Z + BIN_H/2）
 
-# 抓取/放置高度
-APPROACH_HEIGHT  = 0.12   # 预抓取时桌面以上高度
-GRASP_HEIGHT     = 0.005  # 实际抓取时物体中心以上高度
-PLACE_HEIGHT     = 0.06   # 在碗中心上方释放的高度
+# 运动高度
+APPROACH_H    = 0.13
+GRASP_H       = 0.005
+PLACE_H       = 0.07
 
-# 图像裁剪尺寸
-CROP_SIZE = 28
+# 图像crop参数
+CROP_SIZE     = 28
+POSITION_NOISE_SIGMA = 0.035
 
-# 位置噪声 sigma：约等于裁剪半径的一半（米，参考 ExploRLLM 论文）
-# 假设每个裁剪覆盖约 8cm 半径 → σ = 0.04
-POSITION_NOISE_SIGMA = 0.04
+# Gazebo模型名称约定：{color}_block, {color}_bin
+def block_name(color: str) -> str: return f"{color}_block"
+def bin_name(color: str)   -> str: return f"{color}_bin"
 
-# 跟踪的物体数量（抓取仅用块，放置时参考全部）
-N_OBJECTS = len(BLOCK_NAMES)      # 3
-N_TARGETS = len(BOWL_NAMES)       # 3
-N_TOTAL   = N_OBJECTS + N_TARGETS # 6
-
-
-# ── 环境类 ───────────────────────────────────────────────────────────────────
 
 class SagittariusPickPlaceEnv(gym.Env):
     """
-    Sagittarius SGR532 的单步抓取或放置环境。
+    升级版 Sagittarius pick-and-place 环境。
 
-    每次 step() 只执行一个原语（抓取 或 放置）。
-    智能体需串联 抓取 → 放置 才能完成一次任务。
+    支持：
+      - 任意多种颜色（由ColorConfig决定）
+      - 方块和垃圾桶每个episode都随机位置
+      - 自然语言指令：指定pick哪种颜色、place进哪种颜色的桶
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -91,139 +87,130 @@ class SagittariusPickPlaceEnv(gym.Env):
                  task: str = "short_horizon",
                  max_steps: int = 10,
                  noise_sigma: float = POSITION_NOISE_SIGMA,
-                 render_mode: str = None):
-        """
-        Args:
-            task        : "short_horizon"（抓一个放一个）或
-                          "long_horizon"（把所有块按颜色放入对应碗）
-            max_steps   : 每个 episode 最大原语步数
-            noise_sigma : 加到真值位置上的高斯噪声标准差
-            render_mode : gymnasium 渲染模式（未用，由 Gazebo 负责显示）
-        """
+                 color_config: ColorConfig = None,
+                 yaml_path: str = None):
+
         super().__init__()
+        self.task        = task
+        self.max_steps   = max_steps
+        self.noise_sigma = noise_sigma
+        self.color_cfg   = color_config or get_color_config(yaml_path)
 
-        self.task         = task
-        self.max_steps    = max_steps
-        self.noise_sigma  = noise_sigma
-        self.render_mode  = render_mode
-        self._step_count  = 0
+        N = self.color_cfg.n_colors   # 颜色总数（动态）
+
+        # 当前episode的任务颜色
+        self.pick_color:  str = self.color_cfg.colors[0]
+        self.place_color: str = self.color_cfg.colors[1]
+        self._step_count   = 0
         self._gripper_open = True
+        self._holding_color: str = None   # 当前夹着哪种颜色的方块
 
-        # 当前 episode 的语言目标
-        self.pick_color   = None   # 例如 "red"
-        self.place_color  = None   # 例如 "blue"
-
-        # ── Gymnasium 空间定义 ─────────────────────────────────────────────────
-        # 观测：扁平 Box，便于 stable-baselines3，由 CustomSACPolicy 再拆开
-        # 布局: [img_patches(N_total*3*28*28), positions(N_total*2),
-        #        gripper(1), lang_onehot(6)]
-        img_dim   = N_TOTAL * 3 * CROP_SIZE * CROP_SIZE  # 6*3*28*28 = 14112
-        pos_dim   = N_TOTAL * 2                           # 12
+        # ── 观测空间 ──────────────────────────────────────────────────────
+        # img: N_colors * 3 * 28 * 28
+        # block_positions: N_colors * 2
+        # bin_positions:   N_colors * 2
+        # gripper: 1
+        # task: 2 (pick_idx, place_idx，整数但存为float)
+        img_dim   = N * 3 * CROP_SIZE * CROP_SIZE
+        pos_dim   = N * 2   # blocks
+        bin_dim   = N * 2   # bins
         grip_dim  = 1
-        lang_dim  = N_OBJECTS + N_TARGETS                 # 6  (抓/放 one-hot)
-        obs_dim   = img_dim + pos_dim + grip_dim + lang_dim
+        task_dim  = 2
+        obs_dim   = img_dim + pos_dim + bin_dim + grip_dim + task_dim
+
+        self.img_dim  = img_dim
+        self.pos_dim  = pos_dim
+        self.bin_dim  = bin_dim
+        self.obs_dim  = obs_dim
+        self.N        = N
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
             shape=(obs_dim,), dtype=np.float32
         )
 
-        # 动作: [primitive(1), obj_index(1), residual_x(1), residual_y(1)]
-        # 此处 primitive、obj_index 为连续值，通过四舍五入离散化
+        # ── 动作空间 ──────────────────────────────────────────────────────
+        # [primitive(0-1), obj_index(0 to 2N-1), res_x, res_y]
+        # obj_index 0..N-1 = 方块索引（对应color_cfg.colors）
+        # obj_index N..2N-1 = 桶索引
         self.action_space = spaces.Box(
-            low=np.array([0.0, 0.0, -0.05, -0.05], dtype=np.float32),
-            high=np.array([1.0, float(N_TOTAL-1), 0.05, 0.05], dtype=np.float32)
+            low=np.array( [0.0, 0.0, -0.05, -0.05], dtype=np.float32),
+            high=np.array([1.0, float(2*N-1), 0.05, 0.05], dtype=np.float32)
         )
 
-        # ── ROS / MoveIt 初始化（延后到首次 reset 再执行）──────────────────────
+        # ── 内部状态 ──────────────────────────────────────────────────────
         self._ros_initialized = False
         self._moveit_arm      = None
         self._moveit_gripper  = None
-        self._model_states    = None  # 最新的 /gazebo/model_states 消息
-        self._image_cache     = {}    # 物体名 -> 最新 np.ndarray (H,W,3)
+        self._model_states    = None
+        self._latest_image    = None
+        self._bridge          = None
 
-        # 延后调用 _init_ros()，在首次 reset() 时执行，避免多 env 时 rospy.init_node 冲突
+        # 当前episode中物体位置缓存（含噪声）
+        self._block_positions: dict = {}   # color → np.array([x,y])
+        self._bin_positions:   dict = {}   # color → np.array([x,y])
 
-    # ── ROS 初始化 ────────────────────────────────────────────────────────────
+    # ── ROS初始化 ──────────────────────────────────────────────────────────
 
     def _init_ros(self):
-        """初始化 ROS 节点、MoveIt 及话题订阅。"""
         if self._ros_initialized:
             return
 
-        rospy.loginfo("[Env] Initialising ROS node...")
-        # 仅在尚未初始化时创建节点（允许外部先初始化）
         if not rospy.core.is_initialized():
             rospy.init_node("explorllm_env", anonymous=True)
 
-        # MoveIt 控制组
         moveit_commander.roscpp_initialize(sys.argv)
-        self._moveit_arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
+        self._moveit_arm     = moveit_commander.MoveGroupCommander("sagittarius_arm")
         self._moveit_gripper = moveit_commander.MoveGroupCommander("sagittarius_gripper")
 
-        # 位姿容差与速度
         self._moveit_arm.set_goal_position_tolerance(0.005)
         self._moveit_arm.set_goal_orientation_tolerance(0.02)
         self._moveit_arm.set_max_velocity_scaling_factor(0.4)
         self._moveit_arm.set_max_acceleration_scaling_factor(0.4)
         self._moveit_arm.allow_replanning(True)
-
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
-        self._moveit_gripper.set_max_acceleration_scaling_factor(0.5)
 
-        # 订阅 Gazebo 模型状态（真值位置）
         rospy.Subscriber("/gazebo/model_states", ModelStates,
-                         self._model_states_cb, queue_size=1)
+                         self._model_cb, queue_size=1)
 
-        # 订阅相机图像（评估时用于裁剪）
         try:
             from sensor_msgs.msg import Image
             from cv_bridge import CvBridge
             self._bridge = CvBridge()
-            self._latest_image = None
             rospy.Subscriber("/usb_cam/image_raw", Image,
-                             self._image_cb, queue_size=1)
-            rospy.loginfo("[Env] Camera subscriber registered.")
+                             self._img_cb, queue_size=1)
         except ImportError:
-            rospy.logwarn("[Env] cv_bridge not found; using blank image crops.")
-            self._bridge = None
-            self._latest_image = None
+            pass
 
-        # Gazebo 服务
         rospy.wait_for_service("/gazebo/set_model_state", timeout=10)
         self._set_model_state = rospy.ServiceProxy(
             "/gazebo/set_model_state", SetModelState)
 
-        # 若物理仿真暂停则恢复
-        rospy.wait_for_service("/gazebo/unpause_physics", timeout=5)
-        unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
         try:
-            unpause()
-        except rospy.ServiceException:
+            rospy.wait_for_service("/gazebo/unpause_physics", timeout=5)
+            rospy.ServiceProxy("/gazebo/unpause_physics", Empty)()
+        except Exception:
             pass
 
         self._ros_initialized = True
-        rospy.loginfo("[Env] ROS initialisation complete.")
+        rospy.loginfo("[Env] ROS初始化完成。支持颜色: %s",
+                      self.color_cfg.colors)
 
-    def _model_states_cb(self, msg: ModelStates):
+    def _model_cb(self, msg):
         self._model_states = msg
 
-    def _image_cb(self, msg):
-        if self._bridge is not None:
-            import cv2
+    def _img_cb(self, msg):
+        if self._bridge:
             try:
                 self._latest_image = self._bridge.imgmsg_to_cv2(msg, "bgr8")
             except Exception:
                 pass
 
-    # ── Gazebo 物体管理 ───────────────────────────────────────────────────────
+    # ── Gazebo物体操作 ───────────────────────────────────────────────────────
 
-    def _get_object_pose(self, name: str) -> np.ndarray:
-        """
-        从最新 ModelStates 中取指定物体的 (x, y, z)。
-        若未找到则返回零向量。
-        """
+    def _get_pose(self, name: str) -> np.ndarray:
+        """从model_states获取物体GT坐标(x,y,z)。"""
         if self._model_states is None:
             return np.zeros(3, dtype=np.float32)
         try:
@@ -231,36 +218,9 @@ class SagittariusPickPlaceEnv(gym.Env):
             p = self._model_states.pose[idx].position
             return np.array([p.x, p.y, p.z], dtype=np.float32)
         except ValueError:
-            rospy.logwarn(f"[Env] Object '{name}' not in model_states.")
             return np.zeros(3, dtype=np.float32)
 
-    def _randomize_objects(self):
-        """将块随机传送到桌面上；碗放在固定区域。"""
-        rng = np.random.default_rng()
-
-        # 随机块位置（防碰撞：至少相距 8cm）
-        placed = []
-        for name in BLOCK_NAMES:
-            for _ in range(50):  # 最大尝试次数
-                x = rng.uniform(TABLE_X_MIN + 0.05, TABLE_X_MAX - 0.05)
-                y = rng.uniform(TABLE_Y_MIN + 0.05, TABLE_Y_MAX - 0.05)
-                if all(np.linalg.norm([x - px, y - py]) > 0.08
-                       for (px, py) in placed):
-                    placed.append((x, y))
-                    self._teleport(name, x, y, TABLE_Z + 0.02)
-                    break
-
-        # 碗固定在指定位置（在块随机区域之外）
-        bowl_positions = [
-            (0.35, -0.15, TABLE_Z),   # red bowl
-            (0.35,  0.00, TABLE_Z),   # green bowl
-            (0.35,  0.15, TABLE_Z),   # blue bowl
-        ]
-        for name, (x, y, z) in zip(BOWL_NAMES, bowl_positions):
-            self._teleport(name, x, y, z)
-
     def _teleport(self, name: str, x: float, y: float, z: float):
-        """将 Gazebo 模型瞬间移动到 (x,y,z)。"""
         state = ModelState()
         state.model_name = name
         state.pose.position.x = x
@@ -270,44 +230,81 @@ class SagittariusPickPlaceEnv(gym.Env):
         state.reference_frame = "world"
         try:
             self._set_model_state(state)
-        except rospy.ServiceException as e:
-            rospy.logwarn(f"[Env] Teleport failed for {name}: {e}")
+        except Exception as e:
+            rospy.logwarn(f"[Env] Teleport {name} 失败: {e}")
 
-    # ── 观测构建 ───────────────────────────────────────────────────────────────
-
-    def _get_positions_with_noise(self) -> np.ndarray:
+    def _randomize_scene(self):
         """
-        返回带高斯噪声的 (N_total, 2) 的 x,y 位置数组。
-        用于训练时模拟真实相机检测不确定性。
+        随机化所有方块和垃圾桶的位置。
+
+        方块放在桌面左半区，桶放在右半区。
+        两个区域不重叠，互相不会碰撞。
+        同区域内的物体保持最小间距。
         """
-        positions = []
-        for name in ALL_OBJECTS:
-            xyz = self._get_object_pose(name)
-            noise = np.random.normal(0, self.noise_sigma, size=2)
-            positions.append(xyz[:2] + noise)
-        return np.array(positions, dtype=np.float32)  # (N_total, 2)
+        rng = np.random.default_rng()
 
-    def _get_image_crops(self, positions: np.ndarray) -> np.ndarray:
+        # ── 随机化方块 ────────────────────────────────────────────────────
+        placed_blocks = []
+        for color in self.color_cfg.colors:
+            name = block_name(color)
+            for _ in range(50):
+                x = rng.uniform(*BLOCK_ZONE_X)
+                y = rng.uniform(*BLOCK_ZONE_Y)
+                if all(np.linalg.norm([x-px, y-py]) > 0.08
+                       for px, py in placed_blocks):
+                    placed_blocks.append((x, y))
+                    self._teleport(name, x, y, TABLE_Z + BLOCK_H / 2)
+                    break
+
+        # ── 随机化垃圾桶 ──────────────────────────────────────────────────
+        placed_bins = []
+        for color in self.color_cfg.colors:
+            name = bin_name(color)
+            for _ in range(50):
+                x = rng.uniform(*BIN_ZONE_X)
+                y = rng.uniform(*BIN_ZONE_Y)
+                if all(np.linalg.norm([x-px, y-py]) > 0.10
+                       for px, py in placed_bins):
+                    placed_bins.append((x, y))
+                    self._teleport(name, x, y, TABLE_Z + BIN_H / 2)
+                    break
+
+    # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
+
+    def _refresh_positions(self):
+        """刷新所有物体的带噪声位置缓存（每次step调用）。"""
+        noise = lambda: np.random.normal(0, self.noise_sigma, 2)
+        for color in self.color_cfg.colors:
+            xyz = self._get_pose(block_name(color))
+            self._block_positions[color] = xyz[:2] + noise()
+            xyz = self._get_pose(bin_name(color))
+            self._bin_positions[color]   = xyz[:2] + noise()
+
+    def _get_block_pos(self, color: str) -> np.ndarray:
+        return self._block_positions.get(
+            color, np.zeros(2, dtype=np.float32))
+
+    def _get_bin_pos(self, color: str) -> np.ndarray:
+        return self._bin_positions.get(
+            color, np.zeros(2, dtype=np.float32))
+
+    # ── Observation构建 ──────────────────────────────────────────────────────
+
+    def _build_crops(self) -> np.ndarray:
         """
-        在每个物体位置周围裁出 28x28 的 RGB 块。
-        若无相机图像则使用空白块。
-
-        Args:
-            positions: (N_total, 2) 机器人坐标系下的物体位置
-
-        Returns:
-            crops: (N_total, 3, 28, 28) float32，取值 [0,1]
+        提取每种颜色对应的图像crop。
+        顺序：[color_0_block, color_1_block, ..., color_0_bin, ...]
+        等等——其实observation里我们只放方块的crop，桶的位置用坐标表示。
+        返回形状 (N, 3, 28, 28)
         """
         import cv2
         crops = []
         img = self._latest_image
 
-        for i, name in enumerate(ALL_OBJECTS):
+        for color in self.color_cfg.colors:
+            block_pos = self._get_block_pos(color)   # (x,y) in robot frame
             if img is not None:
-                # 将机器人坐标系 (x,y) 投影到图像像素 (u,v)
-                # 使用 Lab2 camera_calibration_hsv 的标定结果
-                # 训练时采用简单透视近似
-                u, v = self._robot_to_pixel(positions[i])
+                u, v = self._robot_to_pixel(block_pos)
                 h, w = img.shape[:2]
                 u, v = int(np.clip(u, 14, w-14)), int(np.clip(v, 14, h-14))
                 crop = img[v-14:v+14, u-14:u+14]
@@ -316,68 +313,65 @@ class SagittariusPickPlaceEnv(gym.Env):
                 crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                 crop = crop.astype(np.float32) / 255.0
             else:
-                # 纯 Gazebo 训练无相机时使用空白块
                 crop = np.zeros((28, 28, 3), dtype=np.float32)
-
-            # (H,W,C) → (C,H,W) 符合 PyTorch 约定
             crops.append(crop.transpose(2, 0, 1))
 
-        return np.array(crops, dtype=np.float32)  # (N_total, 3, 28, 28)
+        return np.array(crops, dtype=np.float32)  # (N, 3, 28, 28)
 
-    def _robot_to_pixel(self, xy: np.ndarray):
-        """
-        将机器人坐标系 (x,y) 转换为相机像素 (u,v)。
-        使用 Lab2 标定得到的线性回归系数。
-        运行 camera_calibration_hsv.launch 后请替换为实际标定值。
-
-        占位：假设俯视相机约 60cm 高度。
-        """
-        # 以下为标定脚本输出的 k,b，运行 Lab2 标定后请用 vision_config.yaml 中的值替换
-        kx, bx = -0.00029, 0.31084   # x_robot = kx*v_pixel + bx
-        ky, by =  0.00030, 0.09080   # y_robot = ky*u_pixel + by
-
-        # 反解得到从机器人坐标到像素
-        if abs(kx) > 1e-9:
-            v = (xy[0] - bx) / kx
-        else:
-            v = 240
-        if abs(ky) > 1e-9:
-            u = (xy[1] - by) / ky
-        else:
-            u = 320
+    def _robot_to_pixel(self, xy: np.ndarray) -> Tuple:
+        """机械臂坐标 → 像素坐标（需要标定值）。"""
+        from perception.camera_perception import CameraPerception
+        # 用默认标定值，真机部署时会被替换
+        kx, bx = -0.00029, 0.31084
+        ky, by  =  0.00030, 0.09080
+        v = (xy[0] - bx) / kx if abs(kx) > 1e-9 else 240
+        u = (xy[1] - by) / ky if abs(ky) > 1e-9 else 320
         return float(u), float(v)
-
-    def _build_lang_onehot(self) -> np.ndarray:
-        """
-        构建 6 维 one-hot：[pick_r, pick_g, pick_b, place_r, place_g, place_b]
-        """
-        vec = np.zeros(N_OBJECTS + N_TARGETS, dtype=np.float32)
-        if self.pick_color  in COLOR_INDEX:
-            vec[COLOR_INDEX[self.pick_color]]  = 1.0
-        if self.place_color in COLOR_INDEX:
-            vec[N_OBJECTS + COLOR_INDEX[self.place_color]] = 1.0
-        return vec
 
     def _build_observation(self) -> np.ndarray:
         """
-        组装完整的扁平观测向量。
-        布局: [img_patches | positions | gripper | lang]
+        构建完整observation向量。
+
+        新布局（相比原版增加了bin_positions和改了task编码）：
+          [crops(N*3*28*28) | block_pos(N*2) | bin_pos(N*2) | gripper(1) | task(2)]
         """
-        positions = self._get_positions_with_noise()    # (N_total, 2)
-        crops     = self._get_image_crops(positions)    # (N_total, 3, 28, 28)
-        gripper   = np.array([0.0 if self._gripper_open else 1.0],
-                              dtype=np.float32)
-        lang      = self._build_lang_onehot()           # (6,)
+        self._refresh_positions()
+
+        crops = self._build_crops()   # (N, 3, 28, 28)
+
+        # 方块位置
+        block_pos = np.array(
+            [self._get_block_pos(c) for c in self.color_cfg.colors],
+            dtype=np.float32).flatten()   # (N*2,)
+
+        # 桶位置（重要升级：现在包含在observation里）
+        bin_pos = np.array(
+            [self._get_bin_pos(c) for c in self.color_cfg.colors],
+            dtype=np.float32).flatten()   # (N*2,)
+
+        gripper = np.array(
+            [0.0 if self._gripper_open else 1.0], dtype=np.float32)
+
+        # 任务编码：两个整数index（不再是one-hot，支持任意颜色数）
+        task = np.array([
+            float(self.color_cfg.color_to_idx(self.pick_color)),
+            float(self.color_cfg.color_to_idx(self.place_color)),
+        ], dtype=np.float32)
 
         obs = np.concatenate([
-            crops.flatten(),       # 14112
-            positions.flatten(),   # 12
-            gripper,               # 1
-            lang,                  # 6
+            crops.flatten(),   # N*3*28*28
+            block_pos,         # N*2
+            bin_pos,           # N*2
+            gripper,           # 1
+            task,              # 2
         ]).astype(np.float32)
+
+        assert obs.shape == (self.obs_dim,), \
+            f"obs shape {obs.shape} != expected {(self.obs_dim,)}"
+
         return obs
 
-    # ── MoveIt 运动原语 ───────────────────────────────────────────────────────
+    # ── MoveIt动作原语 ──────────────────────────────────────────────────────
 
     def _open_gripper(self):
         self._moveit_gripper.set_named_target("open")
@@ -391,259 +385,161 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._gripper_open = False
         time.sleep(0.3)
 
-    def _move_to_pose(self, x: float, y: float, z: float,
-                      qx=0.0, qy=0.0, qz=0.0, qw=1.0) -> bool:
-        """
-        将机械臂末端移动到笛卡尔位姿 (x,y,z) 及四元数。
-        规划并执行成功返回 True。
-        """
+    def _move_to_xy(self, x: float, y: float, z: float) -> bool:
         target = PoseStamped()
         target.header.frame_id = "world"
         target.pose.position.x = x
         target.pose.position.y = y
         target.pose.position.z = z
-        target.pose.orientation.x = qx
-        target.pose.orientation.y = qy
-        target.pose.orientation.z = qz
-        target.pose.orientation.w = qw
-
+        target.pose.orientation.w = 1.0
         self._moveit_arm.set_start_state_to_current_state()
         self._moveit_arm.set_pose_target(
             target, self._moveit_arm.get_end_effector_link())
-
-        success, traj, _, err = self._moveit_arm.plan()
-        if success:
+        ok, traj, _, _ = self._moveit_arm.plan()
+        if ok:
             self._moveit_arm.execute(traj, wait=True)
             time.sleep(0.2)
-        return success
+        return ok
 
-    def _execute_pick(self, x: float, y: float) -> bool:
-        """
-        完整抓取原语：
-          1. 张开夹爪
-          2. 移动到目标上方（approach 高度）
-          3. 下到抓取高度
-          4. 闭合夹爪
-          5. 抬回
-        全部成功返回 True。
-        """
+    def _execute_pick(self, x: float, y: float, color: str) -> bool:
         self._open_gripper()
-
-        # 从上方接近
-        ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
-        if not ok:
-            rospy.logwarn("[Env] Pick approach planning failed.")
-            return False
-
-        # 下降
-        ok = self._move_to_pose(x, y, TABLE_Z + GRASP_HEIGHT)
-        if not ok:
-            rospy.logwarn("[Env] Pick descend planning failed.")
-            return False
-
-        # 抓取
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
+        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):    return False
         self._close_gripper()
-
-        # 抬起
-        ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
-        if not ok:
-            rospy.logwarn("[Env] Pick lift planning failed.")
-            return False
-
+        self._holding_color = color
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
         return True
 
     def _execute_place(self, x: float, y: float) -> bool:
-        """
-        完整放置原语：
-          1. 移动到目标碗上方（approach 高度）
-          2. 下到放置高度
-          3. 张开夹爪
-          4. 抬回
-        全部成功返回 True。
-        """
-        # 移动到碗上方
-        ok = self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
-        if not ok:
-            rospy.logwarn("[Env] Place approach planning failed.")
-            return False
-
-        # 略下降
-        ok = self._move_to_pose(x, y, TABLE_Z + PLACE_HEIGHT)
-        if not ok:
-            rospy.logwarn("[Env] Place descend planning failed.")
-            return False
-
-        # 释放
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
+        if not self._move_to_xy(x, y, TABLE_Z + PLACE_H):    return False
         self._open_gripper()
-
-        # 抬起
-        self._move_to_pose(x, y, TABLE_Z + APPROACH_HEIGHT)
-
+        self._holding_color = None
+        self._move_to_xy(x, y, TABLE_Z + APPROACH_H)
         return True
 
     def _return_home(self):
-        """将机械臂回到安全的 'Home' 命名位姿。"""
         try:
             self._moveit_arm.set_named_target("Home")
             self._moveit_arm.go(wait=True)
             self._open_gripper()
-        except Exception as e:
-            rospy.logwarn(f"[Env] Failed to return home: {e}")
+        except Exception:
+            pass
 
-    # ── 奖励计算 ───────────────────────────────────────────────────────────────
+    # ── 奖励函数 ──────────────────────────────────────────────────────────────
 
-    def _compute_reward(self, primitive: int, obj_idx: int,
-                        action_xy: np.ndarray,
-                        success: bool) -> float:
-        """
-        奖励 = 稠密距离项 + 稀疏成功项。
-
-        稠密：末端到目标的负距离（鼓励靠近）
-        稀疏：放置后块在正确碗内则 +1.0
-        """
+    def _compute_reward(self, primitive: int, color: str,
+                        action_xy: np.ndarray, success: bool) -> float:
         r = 0.0
 
         if primitive == 0:  # pick
-            # 稠密：朝目标块移动给奖励
-            target_name = BLOCK_NAMES[obj_idx % N_OBJECTS]
-            target_pos  = self._get_object_pose(target_name)[:2]
+            target_pos = self._get_block_pos(color)
             dist = np.linalg.norm(action_xy - target_pos)
-            r += -dist  # 越近越好
+            r += -dist
+            if success and color == self.pick_color:
+                r += 0.2   # 小bonus：抓对了颜色
 
         elif primitive == 1:  # place
-            # 稠密：靠近目标碗给奖励
-            bowl_name  = f"{self.place_color}_bowl"
-            bowl_pos   = self._get_object_pose(bowl_name)[:2]
-            dist = np.linalg.norm(action_xy - bowl_pos)
+            target_pos = self._get_bin_pos(self.place_color)
+            dist = np.linalg.norm(action_xy - target_pos)
             r += -dist
-
-            # 稀疏：检查块是否在碗内
             if success:
-                block_name = f"{self.pick_color}_block"
-                block_pos  = self._get_object_pose(block_name)[:2]
-                bowl_pos2  = self._get_object_pose(bowl_name)[:2]
-                if np.linalg.norm(block_pos - bowl_pos2) < 0.05:
-                    r += 1.0  # 任务成功
+                # 检查方块是否真的进桶了
+                block_pos  = self._get_pose(block_name(self.pick_color))[:2]
+                bin_gt_pos = self._get_pose(bin_name(self.place_color))[:2]
+                if np.linalg.norm(block_pos - bin_gt_pos) < 0.06:
+                    r += 1.0   # 任务成功
 
         if not success:
-            r -= 0.2  # 运动规划失败惩罚
+            r -= 0.2
 
         return float(r)
 
-    def _check_task_done(self) -> bool:
-        """若 episode 级任务目标已完成则返回 True。"""
-        if self.task == "short_horizon":
-            # 当 pick_color 块进入 place_color 碗时视为完成
-            block_pos = self._get_object_pose(f"{self.pick_color}_block")[:2]
-            bowl_pos  = self._get_object_pose(f"{self.place_color}_bowl")[:2]
-            return np.linalg.norm(block_pos - bowl_pos) < 0.05
-
-        elif self.task == "long_horizon":
-            # 当所有块都在对应颜色的碗内时完成
-            for color in ["red", "green", "blue"]:
-                block_pos = self._get_object_pose(f"{color}_block")[:2]
-                bowl_pos  = self._get_object_pose(f"{color}_bowl")[:2]
-                if np.linalg.norm(block_pos - bowl_pos) >= 0.05:
-                    return False
-            return True
-
-        return False
+    def _check_done(self) -> bool:
+        """检查当前任务是否完成。"""
+        block_pos = self._get_pose(block_name(self.pick_color))[:2]
+        bin_pos   = self._get_pose(bin_name(self.place_color))[:2]
+        return np.linalg.norm(block_pos - bin_pos) < 0.06
 
     # ── Gymnasium API ─────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
-        """
-        重置 episode：
-          1. 在 Gazebo 中随机物体位置
-          2. 采样新的语言目标
-          3. 机械臂回 Home
-          4. 构建初始观测
-        """
         super().reset(seed=seed)
-        self._init_ros()  # 首次之后调用为 no-op
-
-        self._step_count = 0
+        self._init_ros()
+        self._step_count   = 0
         self._gripper_open = True
+        self._holding_color = None
 
-        # 采样语言目标
+        # 随机采样任务颜色（确保pick和place是不同颜色）
         rng = np.random.default_rng(seed)
-        colors = list(COLOR_INDEX.keys())
-        if self.task == "short_horizon":
-            self.pick_color  = rng.choice(colors)
-            remaining = [c for c in colors if c != self.pick_color]
-            self.place_color = rng.choice(remaining)
-        else:
-            # long_horizon：所有块放入对应颜色碗
-            self.pick_color  = None
-            self.place_color = None
+        colors = self.color_cfg.colors
+        self.pick_color  = rng.choice(colors)
+        remaining        = [c for c in colors if c != self.pick_color]
+        self.place_color = rng.choice(remaining)
 
-        # 随机化 Gazebo 场景
-        self._randomize_objects()
-        time.sleep(0.5)  # 等待 Gazebo 物理稳定
-
-        # 机械臂回 Home
+        # 随机化场景
+        self._randomize_scene()
+        time.sleep(0.5)   # 等Gazebo物理引擎稳定
         self._return_home()
 
         obs  = self._build_observation()
         info = {
             "pick_color":  self.pick_color,
             "place_color": self.place_color,
-            "task":        self.task,
+            "n_colors":    self.N,
         }
         return obs, info
 
     def step(self, action: np.ndarray):
-        """
-        执行一个原语动作。
-
-        Args:
-            action: [primitive(0-1), obj_index(0-5), res_x, res_y]
-
-        Returns:
-            obs, reward, terminated, truncated, info
-        """
         self._step_count += 1
 
-        # 解析动作
+        # 解码动作
         primitive = int(np.round(np.clip(action[0], 0, 1)))
-        obj_idx   = int(np.round(np.clip(action[1], 0, N_TOTAL - 1)))
+        obj_idx   = int(np.round(np.clip(action[1], 0, 2*self.N - 1)))
         res_xy    = np.clip(action[2:4], -0.05, 0.05)
 
-        # 以带噪的物体位置为基准，加上残差得到目标点
-        positions = self._get_positions_with_noise()
-        base_xy   = positions[obj_idx]
-        target_xy = base_xy + res_xy
-        target_xy = np.clip(target_xy,
-                            [TABLE_X_MIN, TABLE_Y_MIN],
-                            [TABLE_X_MAX, TABLE_Y_MAX])
-
-        # 执行原语
-        if primitive == 0:
-            success = self._execute_pick(target_xy[0], target_xy[1])
+        # obj_idx 0..N-1 = 方块，N..2N-1 = 桶
+        if obj_idx < self.N:
+            color    = self.color_cfg.idx_to_color(obj_idx)
+            base_xy  = self._get_block_pos(color)
         else:
-            success = self._execute_place(target_xy[0], target_xy[1])
+            color    = self.color_cfg.idx_to_color(obj_idx - self.N)
+            base_xy  = self._get_bin_pos(color)
 
-        # 计算奖励
-        reward = self._compute_reward(primitive, obj_idx, target_xy, success)
+        target_xy = np.clip(
+            base_xy + res_xy,
+            [min(BLOCK_ZONE_X[0], BIN_ZONE_X[0]),
+             min(BLOCK_ZONE_Y[0], BIN_ZONE_Y[0])],
+            [max(BLOCK_ZONE_X[1], BIN_ZONE_X[1]),
+             max(BLOCK_ZONE_Y[1], BIN_ZONE_Y[1])],
+        )
 
-        # 判断是否结束
-        terminated = self._check_task_done()
+        # 执行动作原语
+        if primitive == 0:
+            success = self._execute_pick(
+                target_xy[0], target_xy[1], color)
+        else:
+            success = self._execute_place(
+                target_xy[0], target_xy[1])
+
+        reward     = self._compute_reward(primitive, color, target_xy, success)
+        terminated = self._check_done()
         truncated  = self._step_count >= self.max_steps
 
-        # 重新构建观测
         obs = self._build_observation()
-
         info = {
             "primitive":  primitive,
+            "color":      color,
             "obj_idx":    obj_idx,
             "target_xy":  target_xy.tolist(),
             "success":    success,
             "step":       self._step_count,
+            "pick_color": self.pick_color,
+            "place_color":self.place_color,
         }
         return obs, reward, terminated, truncated, info
 
     def close(self):
-        """释放 MoveIt 与 ROS 资源。"""
         if self._ros_initialized:
             try:
                 self._return_home()

@@ -2,322 +2,269 @@
 # -*- coding: utf-8 -*-
 """
 custom_sac.py
-=============
-自定义 SAC 策略：物体中心观测编码器
-    CNN（逐物体图像块）→ 拼接位置与语言 → 自注意力 → MLP
+================
+升级版SAC，相比原版的核心变化：
 
-并实现 ExploRLLMSAC：在 rollout 收集阶段注入 LLM 探索的 SAC 子类（对应 Algorithm 1）。
-
-结构（来自 ExploRLLM 论文）：
-    对每个物体 i：
-        crop_i (3,28,28) ──► 2 层 CNN ──► feature_i (d_feat)
-        feature_i + pos_i + gripper + lang ──► φ'_i (d')
-    [φ'_0, ..., φ'_{N-1}] ──► Self-Attention ──► global_feat
-    global_feat ──► 2 层 MLP ──► Q 或 π
+  变化1：颜色用Embedding层编码（而不是one-hot）
+         支持任意数量颜色，颜色数量变化时网络结构不需要改
+  变化2：Observation里现在包含桶的位置，encoder要处理更多位置数据
+  变化3：ObsDecoder正确拆解新的observation布局
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple, Type, Union, Any
-
-from stable_baselines3 import SAC
-from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.type_aliases import GymEnv, Schedule
+from typing import Dict, Optional, Tuple, Type
 import gymnasium as gym
 
-
-# ── 维度常量（须与 pick_place_env.py 一致）────────────────────────────────────
-
-N_TOTAL    = 6       # 块+碗
-CROP_SIZE  = 28
-IMG_DIM    = N_TOTAL * 3 * CROP_SIZE * CROP_SIZE   # 14112
-POS_DIM    = N_TOTAL * 2                            # 12
-GRIP_DIM   = 1
-LANG_DIM   = 6
-OBS_DIM    = IMG_DIM + POS_DIM + GRIP_DIM + LANG_DIM   # 14131
+from stable_baselines3 import SAC
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 
-# ── 逐物体 CNN 特征提取器 ────────────────────────────────────────────────────
+CROP_SIZE = 28
 
-class ObjectCropEncoder(nn.Module):
-    """
-    共享 2 层 CNN，将单个 28×28 裁剪编码为特征向量。
-    对每个物体的图像块独立应用。
-    """
 
+class CropEncoder(nn.Module):
+    """对单个28×28 RGB图像crop编码。"""
     def __init__(self, out_dim: int = 64):
         super().__init__()
-        self.cnn = nn.Sequential(
-            # 输入: (3, 28, 28)
-            nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=0),  # → (16,12,12)
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 16, 5, stride=2),   # → (16,12,12)
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=0), # → (32,5,5)
+            nn.Conv2d(16, 32, 3, stride=2),  # → (32,5,5)
             nn.ReLU(),
-            nn.Flatten(),                                            # → 800
+            nn.Flatten(),
             nn.Linear(800, out_dim),
             nn.ReLU(),
         )
         self.out_dim = out_dim
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, 3, 28, 28) → (batch, out_dim)"""
-        return self.cnn(x)
+    def forward(self, x):
+        return self.net(x)
 
-
-# ── 物体特征上的自注意力 ──────────────────────────────────────────────────────
-
-class ObjectSelfAttention(nn.Module):
-    """
-    对 N 个物体特征向量做多头自注意力。
-    通过对注意力输出做 mean-pooling 聚合成一个全局特征。
-    """
-
-    def __init__(self, d_model: int, n_heads: int = 4):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=n_heads,
-            batch_first=True,   # (batch, seq, dim)
-        )
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, N_obj, d_model)
-        returns: (batch, d_model) – mean-pooled 后的注意力特征
-        """
-        attn_out, _ = self.attn(x, x, x)
-        attn_out = self.norm(attn_out + x)      # 残差
-        return attn_out.mean(dim=1)             # (batch, d_model)
-
-
-# ── 完整物体中心特征提取器 ────────────────────────────────────────────────────
 
 class ObjectCentricExtractor(BaseFeaturesExtractor):
     """
-    与 stable-baselines3 兼容的特征提取器。
-
-    输入：形状 (obs_dim,) 的扁平观测向量
-    输出：(features_dim,) 的全局特征向量
-
-    内部流程：un-flatten → 逐 crop CNN → 拼接 pose+lang+gripper → self-attention → 输出
+    升级版特征提取器，支持：
+      - 任意数量颜色（N_colors动态传入）
+      - 颜色任务用Embedding编码
+      - 同时处理方块位置和桶位置
     """
 
     def __init__(self,
                  observation_space: gym.Space,
-                 cnn_out_dim:    int = 64,
-                 attn_dim:       int = 80,  # cnn_out + pos(2) + grip(1) + lang(2)=80 ≈ next multiple-of-heads
-                 n_attn_heads:   int = 4,
-                 features_dim:   int = 128):
+                 n_colors:      int = 3,
+                 cnn_out_dim:   int = 64,
+                 embed_dim:     int = 16,
+                 attn_dim:      int = 96,
+                 n_attn_heads:  int = 4,
+                 features_dim:  int = 128):
         super().__init__(observation_space, features_dim=features_dim)
 
-        self.n_objects   = N_TOTAL
+        self.n_colors    = n_colors
         self.cnn_out_dim = cnn_out_dim
 
-        # 拼接后每个物体的维度：cnn_out(64)+pos(2)+gripper(1)+lang(6) → 投影到 attn_dim
-        per_obj_raw = cnn_out_dim + 2 + 1 + (LANG_DIM // N_TOTAL + LANG_DIM % N_TOTAL)
-        self.project = nn.Linear(per_obj_raw, attn_dim)
+        # ── 计算observation各部分的偏移量 ──────────────────────────────
+        self.img_dim  = n_colors * 3 * CROP_SIZE * CROP_SIZE
+        self.pos_dim  = n_colors * 2   # 方块位置
+        self.bin_dim  = n_colors * 2   # 桶位置
+        self.grip_dim = 1
+        self.task_dim = 2
 
-        self.crop_encoder = ObjectCropEncoder(out_dim=cnn_out_dim)
-        self.attention    = ObjectSelfAttention(d_model=attn_dim, n_heads=n_attn_heads)
+        # ── 模块定义 ──────────────────────────────────────────────────
+        # 图像编码（每个颜色一个crop）
+        self.crop_encoder = CropEncoder(out_dim=cnn_out_dim)
 
+        # 颜色任务embedding（把颜色index映射到向量）
+        self.color_embed = nn.Embedding(n_colors, embed_dim)
+
+        # 每个对象的特征维度：
+        #   cnn_out(64) + block_pos(2) + bin_pos(2) + gripper(1) = 69
+        #   → project to attn_dim
+        per_obj_raw = cnn_out_dim + 2 + 2 + 1
+        self.proj = nn.Linear(per_obj_raw, attn_dim)
+
+        # 自注意力聚合
+        self.attn = nn.MultiheadAttention(
+            attn_dim, n_attn_heads, batch_first=True)
+        self.norm = nn.LayerNorm(attn_dim)
+
+        # 任务编码融合（颜色embedding）
+        task_encoded_dim = embed_dim * 2   # pick + place
+        self.task_proj = nn.Linear(task_encoded_dim, attn_dim)
+
+        # 最终MLP
         self.mlp = nn.Sequential(
-            nn.Linear(attn_dim, features_dim),
+            nn.Linear(attn_dim * 2, features_dim),   # attn + task
             nn.ReLU(),
         )
 
-        self._per_obj_raw = per_obj_raw
-
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """
-        obs: (batch, OBS_DIM)
-        returns: (batch, features_dim)
-        """
-        batch = obs.shape[0]
+        B = obs.shape[0]
+        N = self.n_colors
 
-        # ── 将观测拆开（反扁平化）─────────────────────────────────────────────
-        img_flat  = obs[:, :IMG_DIM]                         # (B, 14112)
-        pos_flat  = obs[:, IMG_DIM : IMG_DIM+POS_DIM]       # (B, 12)
-        grip      = obs[:, IMG_DIM+POS_DIM : IMG_DIM+POS_DIM+GRIP_DIM]   # (B, 1)
-        lang      = obs[:, IMG_DIM+POS_DIM+GRIP_DIM :]     # (B, 6)
+        # ── 拆解observation ────────────────────────────────────────
+        ptr = 0
 
-        # 将图像重排为 (B, N_obj, 3, 28, 28)
-        crops = img_flat.view(batch, self.n_objects, 3, CROP_SIZE, CROP_SIZE)
+        # 图像crops
+        crops_flat = obs[:, ptr : ptr + self.img_dim]
+        ptr += self.img_dim
+        crops = crops_flat.view(B, N, 3, CROP_SIZE, CROP_SIZE)
 
-        # 位置 (B, N_obj, 2)
-        positions = pos_flat.view(batch, self.n_objects, 2)
+        # 方块位置
+        block_pos = obs[:, ptr : ptr + self.pos_dim].view(B, N, 2)
+        ptr += self.pos_dim
 
-        # ── 对每个物体独立编码 ────────────────────────────────────────────────
-        # crops: (B, N_obj, 3, 28, 28) → (B*N_obj, 3, 28, 28)
-        crops_flat = crops.view(batch * self.n_objects, 3, CROP_SIZE, CROP_SIZE)
-        cnn_feats  = self.crop_encoder(crops_flat)           # (B*N_obj, cnn_out)
-        cnn_feats  = cnn_feats.view(batch, self.n_objects, self.cnn_out_dim)
+        # 桶位置（新增）
+        bin_pos = obs[:, ptr : ptr + self.bin_dim].view(B, N, 2)
+        ptr += self.bin_dim
 
-        # ── 构建每个物体的特征向量 ────────────────────────────────────────────
-        # 将 gripper、lang 广播到每个物体
-        grip_exp  = grip.unsqueeze(1).expand(-1, self.n_objects, -1)   # (B, N, 1)
-        lang_exp  = lang.unsqueeze(1).expand(-1, self.n_objects, -1)   # (B, N, 6)
+        # 夹爪状态
+        gripper = obs[:, ptr : ptr + self.grip_dim]   # (B, 1)
+        ptr += self.grip_dim
 
-        per_obj = torch.cat([cnn_feats, positions, grip_exp, lang_exp], dim=-1)
-        # per_obj: (B, N_obj, cnn_out+2+1+6)
+        # 任务编码（两个颜色index）
+        task_raw = obs[:, ptr : ptr + self.task_dim]  # (B, 2) float
+        pick_idx  = task_raw[:, 0].long().clamp(0, N-1)
+        place_idx = task_raw[:, 1].long().clamp(0, N-1)
 
-        # 若不足 _per_obj_raw 则 padding
-        if per_obj.shape[-1] < self._per_obj_raw:
-            pad = self._per_obj_raw - per_obj.shape[-1]
-            per_obj = F.pad(per_obj, (0, pad))
+        # ── 编码图像crops ─────────────────────────────────────────
+        crops_2d = crops.view(B * N, 3, CROP_SIZE, CROP_SIZE)
+        cnn_feats = self.crop_encoder(crops_2d).view(B, N, self.cnn_out_dim)
 
-        per_obj = self.project(per_obj)  # (B, N_obj, attn_dim)
+        # ── 构建每对象特征 ────────────────────────────────────────
+        # 对每个颜色：[cnn | block_pos | bin_pos | gripper]
+        grip_exp = gripper.unsqueeze(1).expand(-1, N, -1)   # (B,N,1)
 
-        # ── 自注意力聚合 ──────────────────────────────────────────────────────
-        global_feat = self.attention(per_obj)   # (B, attn_dim)
+        per_obj = torch.cat([
+            cnn_feats,          # (B,N,64)
+            block_pos,          # (B,N,2)
+            bin_pos,            # (B,N,2)
+            grip_exp,           # (B,N,1)
+        ], dim=-1)              # (B,N,69)
 
-        return self.mlp(global_feat)            # (B, features_dim)
+        per_obj = self.proj(per_obj)   # (B,N,attn_dim)
 
+        # ── 自注意力聚合 ─────────────────────────────────────────
+        attn_out, _ = self.attn(per_obj, per_obj, per_obj)
+        attn_out = self.norm(attn_out + per_obj)
+        global_feat = attn_out.mean(dim=1)   # (B, attn_dim)
 
-# ── 注入 LLM 探索的 ExploRLLM SAC ────────────────────────────────────────────
+        # ── 任务编码（颜色embedding）────────────────────────────
+        pick_emb  = self.color_embed(pick_idx)    # (B, embed_dim)
+        place_emb = self.color_embed(place_idx)   # (B, embed_dim)
+        task_feat = self.task_proj(
+            torch.cat([pick_emb, place_emb], dim=-1))   # (B, attn_dim)
+
+        # ── 融合并输出 ───────────────────────────────────────────
+        combined = torch.cat([global_feat, task_feat], dim=-1)
+        return self.mlp(combined)   # (B, features_dim)
+
 
 class ExploRLLMSAC(SAC):
     """
-    SAC 子类：在收集 rollout 时注入基于 LLM 的探索。
-
-    通过重写 _sample_action 实现 Algorithm 1：
-        j ~ U[0,1)
-        if j <= ε:  使用 LLM 策略
-        else:       使用 SAC 策略
+    升级版SAC，注入LLM探索，兼容新的observation布局。
     """
 
-    def __init__(self,
-                 policy,
-                 env,
-                 llm_policy=None,      # LLMExplorationPolicy 实例
+    def __init__(self, policy, env,
+                 llm_policy=None,
                  warmup_steps: int = 20_000,
-                 obs_parser_fn=None,   # fn(obs_array) → obs_dict，供 LLM 使用
+                 n_colors: int = 3,
                  **kwargs):
         super().__init__(policy, env, **kwargs)
-        self.llm_policy    = llm_policy
-        self.warmup_steps  = warmup_steps
-        self.obs_parser_fn = obs_parser_fn
-        self._llm_steps    = 0   # LLM 引导的步数
-        self._rl_steps     = 0   # RL 引导的步数
+        self.llm_policy   = llm_policy
+        self.warmup_steps = warmup_steps
+        self.n_colors     = n_colors
+        self._llm_steps   = 0
+        self._rl_steps    = 0
 
-    def _sample_action(
-        self,
-        learning_starts: int,
-        action_noise=None,
-        n_envs: int = 1,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        重写 stable-baselines3 的 _sample_action，在其中注入 LLM 探索。
-
-        warmup 之后：
-            - 以概率 ε：用 LLM 生成动作
-            - 否则：按原样使用 SAC 策略
-        """
-        # warmup 期间或未提供 LLM 策略时：保持标准 SAC 行为
+    def _sample_action(self, learning_starts, action_noise=None, n_envs=1):
         if (self.num_timesteps < self.warmup_steps
                 or self.llm_policy is None):
-            return super()._sample_action(learning_starts, action_noise, n_envs)
+            return super()._sample_action(
+                learning_starts, action_noise, n_envs)
 
-        # warmup 之后：ε-greedy 探索
         if self.llm_policy.should_explore():
-            # 使用 LLM 探索
-            obs = self._last_obs  # (n_envs, obs_dim)
+            obs = self._last_obs
             actions = []
             for i in range(n_envs):
-                obs_i = obs[i]
-                if self.obs_parser_fn is not None:
-                    obs_dict = self.obs_parser_fn(obs_i)
-                else:
-                    obs_dict = self._default_obs_parser(obs_i)
-
-                # 从观测中取出图像块
-                crops = obs_i[:IMG_DIM].reshape(N_TOTAL, 3, CROP_SIZE, CROP_SIZE)
-
+                obs_dict = self._parse_obs(obs[i])
+                crops    = self._extract_crops(obs[i])
                 try:
                     action = self.llm_policy.get_exploration_action(
                         obs_dict, crops)
                 except Exception as e:
-                    print(f"[ExploRLLM] LLM action failed: {e}. Falling back to SAC.")
+                    print(f"[SAC] LLM失败: {e}")
                     action, _ = super()._sample_action(
                         learning_starts, action_noise, 1)
                     action = action[0]
-
                 actions.append(action)
-
             self._llm_steps += n_envs
-            buffer_actions = np.array(actions)
-            actions_array  = buffer_actions   # 已是正确尺度
-            return actions_array, buffer_actions
-
+            arr = np.array(actions)
+            return arr, arr
         else:
-            # 使用 SAC 策略
             self._rl_steps += 1
-            return super()._sample_action(learning_starts, action_noise, n_envs)
+            return super()._sample_action(
+                learning_starts, action_noise, n_envs)
 
-    def _default_obs_parser(self, obs: np.ndarray) -> dict:
-        """
-        默认观测解析器：从扁平观测中解析出结构化字典。
-        与 SagittariusPickPlaceEnv._build_observation 的布局一致。
-        """
-        from envs.pick_place_env import ALL_OBJECTS, BLOCK_NAMES, BOWL_NAMES
+    def _parse_obs(self, obs: np.ndarray) -> dict:
+        """从flat observation重建结构化字典，供LLM使用。"""
+        from configs.color_config import get_color_config
+        cfg = get_color_config()
+        N   = cfg.n_colors
 
-        pos_start = IMG_DIM
-        pos_flat  = obs[pos_start : pos_start + POS_DIM]
-        positions = pos_flat.reshape(N_TOTAL, 2)
+        img_dim  = N * 3 * CROP_SIZE * CROP_SIZE
+        pos_dim  = N * 2
+        bin_dim  = N * 2
 
-        grip_val = float(obs[pos_start + POS_DIM])
-        gripper  = "open" if grip_val < 0.5 else "closed"
+        block_pos = obs[img_dim : img_dim+pos_dim].reshape(N, 2)
+        bin_pos   = obs[img_dim+pos_dim : img_dim+pos_dim+bin_dim].reshape(N, 2)
+        gripper   = float(obs[img_dim+pos_dim+bin_dim])
+        task      = obs[img_dim+pos_dim+bin_dim+1 :]
 
-        lang = obs[pos_start + POS_DIM + GRIP_DIM :]
-        # 解码 one-hot 语言目标
-        pick_idx  = int(np.argmax(lang[:3]))
-        place_idx = int(np.argmax(lang[3:]))
-        color_map = {0: "red", 1: "green", 2: "blue"}
-        pick_color  = color_map.get(pick_idx,  "red")
-        place_color = color_map.get(place_idx, "blue")
+        pick_idx  = int(round(float(task[0])))
+        place_idx = int(round(float(task[1])))
+        pick_color  = cfg.idx_to_color(pick_idx)
+        place_color = cfg.idx_to_color(place_idx)
 
-        pos_dict = {}
-        for i, name in enumerate(ALL_OBJECTS):
-            pos_dict[name] = positions[i].tolist()
-
-        held = None
-        if gripper == "closed":
-            held = f"{pick_color}_block"
+        positions = {}
+        for i, c in enumerate(cfg.colors):
+            positions[f"{c}_block"] = block_pos[i].tolist()
+            positions[f"{c}_bin"]   = bin_pos[i].tolist()
 
         return {
-            "positions":   pos_dict,
-            "gripper":     gripper,
+            "positions":   positions,
+            "gripper":     "open" if gripper < 0.5 else "closed",
             "pick_color":  pick_color,
             "place_color": place_color,
-            "held_object": held,
+            "held_object": f"{pick_color}_block" if gripper >= 0.5 else None,
         }
 
+    def _extract_crops(self, obs: np.ndarray) -> np.ndarray:
+        N = self.n_colors
+        img_dim = N * 3 * CROP_SIZE * CROP_SIZE
+        return obs[:img_dim].reshape(N, 3, CROP_SIZE, CROP_SIZE)
+
     def get_exploration_stats(self) -> dict:
-        """返回 LLM 与 RL 步数相关的统计。"""
         total = self._llm_steps + self._rl_steps
         return {
-            "llm_steps":  self._llm_steps,
-            "rl_steps":   self._rl_steps,
-            "total_steps": total,
+            "llm_steps":    self._llm_steps,
+            "rl_steps":     self._rl_steps,
             "llm_fraction": self._llm_steps / max(total, 1),
         }
 
 
-# ── 策略注册辅助函数 ──────────────────────────────────────────────────────────
-
-def make_sac_kwargs(features_dim: int = 128) -> dict:
-    """
-    返回供 stable-baselines3 SAC 使用的 policy_kwargs，
-    以使用 ObjectCentricExtractor。
-    """
+def make_sac_kwargs(n_colors: int = 3,
+                       features_dim: int = 128) -> dict:
+    """给stable-baselines3的SAC构造policy_kwargs。"""
     return {
-        "features_extractor_class": ObjectCentricExtractor,
+        "features_extractor_class":  ObjectCentricExtractor,
         "features_extractor_kwargs": {
-            "cnn_out_dim":  64,
-            "attn_dim":     80,
+            "n_colors":    n_colors,
+            "cnn_out_dim": 64,
+            "embed_dim":   16,
+            "attn_dim":    96,
             "n_attn_heads": 4,
             "features_dim": features_dim,
         },
