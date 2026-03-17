@@ -19,7 +19,100 @@ import textwrap
 import numpy as np
 from typing import Dict, Tuple, Optional, Any
 
-from openai import OpenAI
+"""
+OpenAI SDK 版本兼容说明
+----------------------
+本项目日常开发默认使用 openai>=1.x（推荐），调用方式为：
+  from openai import OpenAI
+  client = OpenAI(...)
+  client.chat.completions.create(...)
+
+但实验室机器可能只能安装到 openai==0.9.1（旧版 SDK），其调用方式为：
+  import openai
+  openai.api_key = ...
+  openai.api_base = ...
+  openai.ChatCompletion.create(...)
+
+为避免在两台机器来回改代码，这里提供“双写法兼容层”：
+- 默认优先走 1.x 新版写法（保持现有调用路径：client.chat.completions.create）
+- 如检测不到 OpenAI 类，或设置环境变量 USE_OPENAI_LEGACY=1，则自动走 0.9.x 旧版写法
+"""
+
+# ── OpenAI SDK 兼容层：优先 1.x，必要时回落到 0.9.x ───────────────────────
+_FORCE_LEGACY = os.environ.get("USE_OPENAI_LEGACY", "").strip() in {"1", "true", "True", "YES", "yes"}
+try:
+    if _FORCE_LEGACY:
+        raise ImportError("Forced legacy OpenAI SDK")
+    # openai>=1.x
+    from openai import OpenAI as _OpenAIClient  # type: ignore
+    _OPENAI_IS_V1 = True
+except Exception:
+    # openai==0.9.x
+    import openai as _openai_legacy  # type: ignore
+    _OpenAIClient = None
+    _OPENAI_IS_V1 = False
+
+
+class _CompatMsg:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _CompatChoice:
+    def __init__(self, content: str):
+        self.message = _CompatMsg(content)
+
+
+class _CompatResp:
+    def __init__(self, content: str):
+        self.choices = [_CompatChoice(content)]
+
+
+class _LegacyChatCompletions:
+    """把 openai==0.9.x 的 ChatCompletion.create 适配到 1.x 风格接口。"""
+
+    @staticmethod
+    def create(model: str, messages, temperature: float, max_tokens: int):
+        resp = _openai_legacy.ChatCompletion.create(  # type: ignore[attr-defined]
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        # 旧版返回通常是 dict-like：choices[0]['message']['content']
+        try:
+            content = resp["choices"][0]["message"]["content"]
+        except Exception:
+            content = str(resp)
+        return _CompatResp(str(content).strip())
+
+
+class _LegacyChat:
+    completions = _LegacyChatCompletions()
+
+
+class _LegacyClient:
+    class chat:  # noqa: N801（保持与新版接口一致的属性名）
+        completions = _LegacyChatCompletions()
+
+
+def _create_openai_client(api_key: str, base_url: Optional[str]):
+    """
+    返回一个具备 `client.chat.completions.create(...)` 方法的对象。
+    - openai>=1.x: 返回 OpenAI(...) 实例
+    - openai==0.9.x: 配置模块级 api_key/api_base 并返回 _LegacyClient()
+    """
+    if _OPENAI_IS_V1:
+        kwargs = {"api_key": api_key, "timeout": 30.0}
+        if base_url:
+            kwargs["base_url"] = base_url
+        return _OpenAIClient(**kwargs)  # type: ignore[misc]
+
+    # legacy 0.9.x
+    _openai_legacy.api_key = api_key  # type: ignore[attr-defined]
+    if base_url:
+        _openai_legacy.api_base = base_url  # type: ignore[attr-defined]
+    return _LegacyClient()
 
 from configs.color_config import ColorConfig, get_color_config
 
@@ -126,10 +219,10 @@ class LLMExplorationPolicy:
             model    = preset["model"]
         self.model = model
 
-        kwargs = {"api_key": api_key, "timeout": 30.0}
-        if base_url:
-            kwargs["base_url"] = base_url
-        self._client = OpenAI(**kwargs)
+        # client 统一接口：self._client.chat.completions.create(...)
+        # - 日常：openai>=1.x（默认）
+        # - 实验室若只能装 openai==0.9.1：设置 USE_OPENAI_LEGACY=1 或自动回落
+        self._client = _create_openai_client(api_key=api_key, base_url=base_url)
 
         self._code_cache: Dict[str, str] = {}
         print(f"[LLM] model={self.model}, ε={self.epsilon}, "

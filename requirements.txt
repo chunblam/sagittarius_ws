@@ -1,0 +1,32 @@
+# ExploRLLM Sagittarius — Python 依赖（部署清单 + README + 代码用到的包）
+#
+# 实验室无 GPU 时，请按下面顺序安装（只装 CPU 版 PyTorch，体积小、不依赖 CUDA）：
+#
+#   步骤1 — 先装 CPU 版 torch（必做）：
+#     pip install --user torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+#   步骤2 — 再装其余依赖：
+#     pip install --user -r requirements.txt
+#
+# 若跳过步骤1 直接执行步骤2，会从 PyPI 安装默认的 torch（可能带 CUDA 依赖，体积大且用不到）。
+
+# 强化学习与环境
+stable-baselines3[extra]>=2.0.0
+gymnasium>=0.29.0
+
+# LLM 调用
+openai>=1.0.0
+
+# 策略网络与数值（请用上面步骤1 安装 CPU 版；此处列出版本约束，步骤2 不会覆盖已安装的 CPU 版）
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+
+# 训练曲线与评估
+matplotlib>=3.7.0
+
+# 颜色配置（从 Lab2 yaml 加载）
+PyYAML>=6.0
+
+# 真机感知与 test_all 调试图（摄像头检测）
+opencv-python>=4.8.0
