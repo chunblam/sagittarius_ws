@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-eval.py  
-==================
-评估脚本：测试训练好的policy或绘制训练曲线。
-
-用法：
-    # 在Gazebo里评估
-    python eval.py --model-path logs/eps0.2_seed0/final_model.zip --n-episodes 30
-
-    # 真机部署（使用摄像头感知）
-    python eval.py --model-path logs/eps0.2_seed0/final_model.zip --real-robot
-
-    # 绘制消融实验曲线
-    python eval.py --plot --log-dir logs/
-
-    # 指定颜色子集评估
-    python eval.py --model-path ... --colors red green blue
+eval.py  (v3 — VLM 感知升级版)
+================================
+变化：
+  - 真机部署时使用 AdaptivePerception（VLM优先，HSV fallback）
+  - 新增 --vlm-api-key / --vlm-model 参数
+  - 真机扫描时用高精度多帧均值模式
+  - 其余逻辑与上一版本保持一致
 """
 
 import os
@@ -31,6 +22,9 @@ import numpy as np
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+import env_config  # noqa: F401 — 加载 .env
+from env_config import vlm_api_key, vlm_base_url, vlm_model
+
 
 def get_args():
     p = argparse.ArgumentParser()
@@ -41,16 +35,29 @@ def get_args():
     p.add_argument("--plot",          action="store_true")
     p.add_argument("--log-dir",       type=str, default="./logs")
     p.add_argument("--output-dir",    type=str, default="./results")
-    p.add_argument("--colors",        type=str, nargs="+", default=None,
-                   help="指定评估时使用的颜色子集")
+    p.add_argument("--colors",        type=str, nargs="+", default=None)
     p.add_argument("--yaml-path",     type=str, default=None)
+
+    # VLM 感知参数（与训练用 LLM 的密钥/网关完全独立）
+    p.add_argument("--vlm-api-key",   type=str,
+                   default=vlm_api_key(),
+                   help="VLM API Key（默认 VLM_API_KEY；真机必填，仿真可空）")
+    p.add_argument("--vlm-model",     type=str, default=vlm_model(),
+                   help="VLM 模型；默认 VLM_MODEL")
+    p.add_argument("--vlm-base-url",  type=str,
+                   default=vlm_base_url(),
+                   help="VLM 网关；默认 VLM_BASE_URL")
+    p.add_argument("--calib-yaml",    type=str, default=None,
+                   help="Lab2 标定 yaml 路径（不指定则使用默认标定值）")
+    p.add_argument("--split-x",       type=int, default=320,
+                   help="图像左右分区分割线（像素），左=方块，右=桶")
     return p.parse_args()
 
 
-# ── 仿真评估 ──────────────────────────────────────────────────────────────────
+# ── 仿真评估（不变） ───────────────────────────────────────────────────────────
 
-def eval_sim(model_path: str, n_episodes: int,
-             task: str, colors=None, yaml_path=None):
+def eval_sim(model_path: str, n_episodes: int, task: str,
+             colors=None, yaml_path=None):
     import rospy
     from configs.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
@@ -63,14 +70,11 @@ def eval_sim(model_path: str, n_episodes: int,
     if colors:
         cfg.colors = [c for c in colors if c in cfg.colors]
         cfg._build_index()
-        print(f"[Eval] 使用颜色子集：{cfg.colors}")
 
-    print(f"[Eval] 加载模型：{model_path}")
     model = ExploRLLMSAC.load(model_path)
-    env   = SagittariusPickPlaceEnv(task=task, max_steps=10,
-                                      color_config=cfg)
+    env   = SagittariusPickPlaceEnv(task=task, max_steps=10, color_config=cfg)
 
-    results  = {"episodes": []}
+    results   = {"episodes": []}
     successes = 0
     rewards   = []
 
@@ -79,15 +83,13 @@ def eval_sim(model_path: str, n_episodes: int,
         ep_r = 0.0
         done = trunc = False
         steps = 0
-
         print(f"\n[Eval] Episode {ep+1}/{n_episodes}  "
-              f"pick={info.get('pick_color')} → "
-              f"place={info.get('place_color')}")
+              f"pick={info.get('pick_color')} → place={info.get('place_color')}")
 
         while not (done or trunc):
             action, _ = model.predict(obs, deterministic=True)
             obs, r, done, trunc, step_info = env.step(action)
-            ep_r += r
+            ep_r  += r
             steps += 1
             prim  = int(round(float(action[0])))
             obj_i = int(round(float(action[1])))
@@ -100,75 +102,75 @@ def eval_sim(model_path: str, n_episodes: int,
         rewards.append(ep_r)
         if done:
             successes += 1
-            print(f"  ✓ 成功！reward={ep_r:.3f}")
+            print(f"  ✓ 成功  reward={ep_r:.3f}")
         else:
-            print(f"  ✗ 超时。reward={ep_r:.3f}")
+            print(f"  ✗ 超时  reward={ep_r:.3f}")
 
         results["episodes"].append({
-            "ep":          ep,
-            "reward":      ep_r,
-            "success":     done,
-            "steps":       steps,
-            "pick_color":  info.get("pick_color"),
+            "ep": ep, "reward": ep_r, "success": done, "steps": steps,
+            "pick_color": info.get("pick_color"),
             "place_color": info.get("place_color"),
         })
 
     results["success_rate"] = successes / n_episodes
     results["mean_reward"]  = float(np.mean(rewards))
     results["std_reward"]   = float(np.std(rewards))
-
-    print(f"\n{'='*52}")
-    print(f"  评估结果（{n_episodes} episodes）")
-    print(f"{'='*52}")
-    print(f"  成功率  : {results['success_rate']:.2%}")
-    print(f"  平均奖励: {results['mean_reward']:.3f} ± {results['std_reward']:.3f}")
-    print(f"{'='*52}\n")
-
+    print(f"\n成功率: {results['success_rate']:.2%}  "
+          f"平均奖励: {results['mean_reward']:.3f}")
     env.close()
     return results
 
 
-# ── 真机评估 ──────────────────────────────────────────────────────────────────
+# ── 真机评估（升级为 VLM 感知） ────────────────────────────────────────────────
 
-def eval_real_robot(model_path: str, n_episodes: int,
-                    task: str, colors=None, yaml_path=None):
+def eval_real_robot(args, n_episodes: int, task: str,
+                    colors=None, yaml_path=None):
     """
     真机部署评估。
 
-    使用摄像头的 CameraPerception 同时检测方块和垃圾桶位置，
-    替换Gazebo GT坐标注入observation。
+    使用 AdaptivePerception（VLM + HSV fallback）替代纯 HSV 检测。
+    VLM 扫描场景获得物体坐标，注入 observation，policy 执行动作。
 
     前置条件：
         roslaunch sagittarius_moveit demo_true.launch
-        roslaunch sagittarius_object_color_detector hsv_params.launch（确保颜色阈值正确）
     """
     import rospy
     from configs.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC
-    from perception.camera_perception import CameraPerception
+    from perception.camera_perception import AdaptivePerception
 
     if not rospy.core.is_initialized():
         rospy.init_node("explorllm_real", anonymous=True)
 
-    cfg  = ColorConfig(yaml_path=yaml_path)
+    cfg = ColorConfig(yaml_path=yaml_path)
     if colors:
         cfg.colors = [c for c in colors if c in cfg.colors]
         cfg._build_index()
 
-    print(f"[RealEval] 加载模型和摄像头感知...")
-    model  = ExploRLLMSAC.load(model_path)
-    camera = CameraPerception(color_config=cfg)
-    env    = SagittariusPickPlaceEnv(task=task, max_steps=10,
-                                       color_config=cfg)
+    model = ExploRLLMSAC.load(args.model_path)
+    env   = SagittariusPickPlaceEnv(task=task, max_steps=10, color_config=cfg)
 
-    print(f"[RealEval] 使用颜色：{cfg.colors}")
-    print(f"[RealEval] 摆放说明：")
-    print(f"  - 方块：随意摆在桌面左侧区域（x=0.15~0.30）")
-    print(f"  - 垃圾桶：随意摆在桌面右侧区域（x=0.28~0.40）")
-    print(f"  - 左右半区无需精确，只需大致分开即可")
-    print(f"  - 方块和桶靠面积自动区分，同颜色不会混淆")
-    input("\n[RealEval] 摆好物品后按 Enter 开始评估...")
+    # 初始化 VLM 感知
+    if not (args.vlm_api_key or "").strip():
+        print("[RealEval] 警告：未设置 VLM_API_KEY / --vlm-api-key，将使用 HSV fallback（功能受限）")
+
+    camera = AdaptivePerception(
+        api_key=args.vlm_api_key or "no-key",
+        vlm_model=args.vlm_model,
+        base_url=args.vlm_base_url,
+        split_x=args.split_x,
+        color_config=cfg,
+    )
+    if args.calib_yaml:
+        camera.load_calibration_from_yaml(args.calib_yaml)
+
+    print(f"\n[RealEval] 摆放说明：")
+    print(f"  - 方块：桌面左侧区域（x=0.15~0.30 m）")
+    print(f"  - 垃圾桶：桌面右侧区域（x=0.28~0.40 m）")
+    print(f"  - VLM 会识别任意颜色，无需提前标定 HSV 阈值")
+    print(f"  - 摄像头分辨率建议 ≥ 640×480，均匀照明")
+    input("\n  摆好物品后按 Enter 开始...\n")
 
     successes = 0
     rewards   = []
@@ -176,32 +178,35 @@ def eval_real_robot(model_path: str, n_episodes: int,
     for ep in range(n_episodes):
         print(f"\n[RealEval] Episode {ep+1}/{n_episodes}")
 
-        # 用摄像头扫描获取当前物体位置
-        print("  扫描桌面场景...")
-        scene = camera.scan_scene(wait_sec=1.5)
-
-        print("  检测到的物体：")
-        for c in cfg.colors:
-            bp   = scene["blocks"].get(c)
-            binp = scene["bins"].get(c)
-            bs   = f"({bp[0]:.3f},{bp[1]:.3f})"   if bp   is not None else "未检测"
-            bns  = f"({binp[0]:.3f},{binp[1]:.3f})" if binp is not None else "未检测"
-            print(f"    {c:8s}: block={bs}  bin={bns}")
-
+        # 高精度多帧扫描
         obs, info = env.reset()
-
-        # 用摄像头坐标覆盖observation里的位置部分
-        obs = _inject_camera_positions(obs, scene, cfg)
-
         pick_c  = info.get("pick_color")
         place_c = info.get("place_color")
         print(f"  任务: pick {pick_c} block → place in {place_c} bin")
+        print(f"  正在扫描场景（VLM，3帧均值）...")
+
+        scene = camera.scan_scene_with_retry(
+            target_block=pick_c,
+            target_bin=place_c,
+            n_frames=3,
+            wait_sec=0.5,
+        )
+
+        # 打印检测结果
+        bp   = scene["blocks"].get(pick_c)
+        binp = scene["bins"].get(place_c)
+        print(f"  {pick_c}_block  : "
+              f"({bp[0]:.3f},{bp[1]:.3f})" if bp else "  目标方块未检测到！")
+        print(f"  {place_c}_bin   : "
+              f"({binp[0]:.3f},{binp[1]:.3f})" if binp else "  目标桶未检测到！")
+
+        obs = _inject_camera_positions(obs, scene, cfg)
 
         ep_r = 0.0
         done = trunc = False
         while not (done or trunc):
-            # 每步刷新一次摄像头（方块被抓后位置会变）
-            scene = camera.scan_scene(wait_sec=0.3)
+            # 每步刷新场景（方块被抓起后位置变化）
+            scene = camera.scan_scene(wait_sec=0.2, n_retry=1)
             obs   = _inject_camera_positions(obs, scene, cfg)
 
             action, _ = model.predict(obs, deterministic=True)
@@ -223,46 +228,36 @@ def eval_real_robot(model_path: str, n_episodes: int,
     return {"success_rate": sr, "mean_reward": float(np.mean(rewards))}
 
 
-def _inject_camera_positions(obs: np.ndarray, scene: dict,
-                              cfg) -> np.ndarray:
-    """
-    将摄像头检测到的位置坐标注入observation向量，
-    替换Gazebo GT位置（用于真机部署）。
-    """
+def _inject_camera_positions(obs: np.ndarray, scene: dict, cfg) -> np.ndarray:
+    """将摄像头检测到的坐标注入 observation 向量（替换 Gazebo GT 坐标）。"""
     obs = obs.copy()
     N       = cfg.n_colors
     img_dim = N * 3 * 28 * 28
+    pos_dim = N * 2
 
-    # 方块位置
     for i, c in enumerate(cfg.colors):
         pos = scene["blocks"].get(c)
         if pos is not None:
-            start = img_dim + i * 2
-            obs[start]   = pos[0]
-            obs[start+1] = pos[1]
+            s = img_dim + i * 2
+            obs[s], obs[s+1] = pos[0], pos[1]
 
-    # 桶位置
-    pos_dim = N * 2
     for i, c in enumerate(cfg.colors):
         pos = scene["bins"].get(c)
         if pos is not None:
-            start = img_dim + pos_dim + i * 2
-            obs[start]   = pos[0]
-            obs[start+1] = pos[1]
+            s = img_dim + pos_dim + i * 2
+            obs[s], obs[s+1] = pos[0], pos[1]
 
     return obs
 
 
-# ── 训练曲线绘图 ──────────────────────────────────────────────────────────────
+# ── 训练曲线绘图（不变） ──────────────────────────────────────────────────────
 
 def plot_training_curves(log_dir: str, output_dir: str):
     try:
         import matplotlib.pyplot as plt
-        import matplotlib
-        matplotlib.use("Agg")
+        import matplotlib; matplotlib.use("Agg")
     except ImportError:
-        print("[Plot] 请安装matplotlib：pip install matplotlib")
-        return
+        print("[Plot] pip install matplotlib"); return
 
     log_dir    = Path(log_dir)
     output_dir = Path(output_dir)
@@ -271,12 +266,10 @@ def plot_training_curves(log_dir: str, output_dir: str):
     runs = {}
     for f in sorted(log_dir.rglob("eval_results.json")):
         try:
-            # 从路径名推断epsilon（格式：eps0.2_seed0）
-            parts = f.parent.name.split("_")
+            parts   = f.parent.name.split("_")
             eps_str = next((p for p in parts if p.startswith("eps")), "eps0.0")
-            eps = float(eps_str.replace("eps",""))
-            key = f"ε={eps:.1f}"
-
+            eps     = float(eps_str.replace("eps", ""))
+            key     = f"ε={eps:.1f}"
             with open(f) as fp:
                 data = json.load(fp)
             steps   = [d["step"]         for d in data]
@@ -287,41 +280,30 @@ def plot_training_curves(log_dir: str, output_dir: str):
             print(f"[Plot] 跳过 {f}: {e}")
 
     if not runs:
-        print("[Plot] 没找到eval_results.json文件")
-        print(f"  检查路径：{log_dir}")
-        return
+        print("[Plot] 没找到 eval_results.json"); return
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    colors_map = {
-        "ε=0.0": "#888780",
-        "ε=0.2": "#1D9E75",
-        "ε=0.5": "#534AB7",
-    }
-
+    cm = {"ε=0.0": "#888780", "ε=0.2": "#1D9E75", "ε=0.5": "#534AB7"}
     for key, seed_runs in sorted(runs.items()):
-        c = colors_map.get(key, "#333333")
-        max_steps = max(r[0][-1] for r in seed_runs)
-        xs = np.linspace(0, max_steps, 200)
-        interps = [np.interp(xs, sr[0], sr[1]) for sr in seed_runs]
-        arr  = np.array(interps)
-        mean = arr.mean(0)
-        std  = arr.std(0)
-        ax.plot(xs/1000, mean, label=f"{key} (n={len(seed_runs)})",
+        c  = cm.get(key, "#333333")
+        mx = max(r[0][-1] for r in seed_runs)
+        xs = np.linspace(0, mx, 200)
+        arr = np.array([np.interp(xs, sr[0], sr[1]) for sr in seed_runs])
+        ax.plot(xs/1000, arr.mean(0), label=f"{key} (n={len(seed_runs)})",
                 color=c, linewidth=2)
-        ax.fill_between(xs/1000, mean-std, mean+std, alpha=0.15, color=c)
+        ax.fill_between(xs/1000, arr.mean(0)-arr.std(0),
+                        arr.mean(0)+arr.std(0), alpha=0.15, color=c)
 
     ax.set_xlabel("训练步数（×10³）", fontsize=12)
-    ax.set_ylabel("任务成功率", fontsize=12)
-    ax.set_title("ExploRLLM 消融实验 — Sagittarius SGR532 ", fontsize=13)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 1.05)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v,_: f"{v:.0%}"))
+    ax.set_ylabel("任务成功率",       fontsize=12)
+    ax.set_title("ExploRLLM 消融实验 — Sagittarius SGR532 (VLM感知)", fontsize=13)
+    ax.legend(fontsize=11); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1.05)
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     plt.tight_layout()
-
     out = output_dir / "training_curves.png"
     plt.savefig(str(out), dpi=150)
-    print(f"[Plot] 训练曲线保存到：{out}")
+    print(f"[Plot] 保存到 {out}")
     plt.close()
 
 
@@ -337,12 +319,12 @@ def main():
         return
 
     if args.model_path is None:
-        print("错误：--model-path 必填（评估模式）")
+        print("错误：--model-path 必填")
         sys.exit(1)
 
     if args.real_robot:
         results = eval_real_robot(
-            args.model_path, args.n_episodes, args.task,
+            args, args.n_episodes, args.task,
             args.colors, args.yaml_path)
     else:
         results = eval_sim(
@@ -352,7 +334,7 @@ def main():
     out_file = out / "eval_results.json"
     with open(out_file, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"[Eval] 结果保存到：{out_file}")
+    print(f"[Eval] 结果保存到 {out_file}")
 
 
 if __name__ == "__main__":

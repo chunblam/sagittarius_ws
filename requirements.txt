@@ -16,6 +16,7 @@ gymnasium>=0.29.0
 
 # LLM 调用
 openai>=1.0.0
+python-dotenv>=1.0.0
 
 # 策略网络与数值（请用上面步骤1 安装 CPU 版；此处列出版本约束，步骤2 不会覆盖已安装的 CPU 版）
 torch>=2.0.0

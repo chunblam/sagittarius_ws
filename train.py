@@ -1,25 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train.py
-===========
-升级版训练脚本，支持多颜色 + 随机桶位置。
-
-用法：
-    # 纯SAC（不需要API Key，测试环境是否能跑通）
-    python train.py --epsilon 0.0
-
-    # 完整ExploRLLM，DeepSeek
-    python train.py --epsilon 0.2 --model deepseek-v3 --api-key sk-xxx
-
-    # 指定要使用的颜色（如果只想用3种颜色测试）
-    python train.py --epsilon 0.2 --colors red green blue
-
-    # 消融实验
-    python train.py --ablation --seeds 0 1 2
-
-    # 指定vision_config.yaml路径（从Lab2标定结果加载颜色）
-    python train.py --epsilon 0.2 --yaml-path ~/sagittarius_ws/.../vision_config.yaml
+train.py  (v3 — VLM 感知升级版)
+================================
+变化：
+  - 新增 --vlm-api-key / --vlm-model 参数（真机评估时用）
+  - 训练阶段仍用 Gazebo GT 坐标（不调 VLM，节省 API 费用）
+  - 其余训练逻辑与上一版本保持一致
 """
 
 import os
@@ -34,49 +21,71 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+import env_config  # noqa: F401 — 加载 .env
+from env_config import (
+    llm_api_key,
+    llm_base_url,
+    llm_model,
+    vlm_api_key,
+    vlm_base_url,
+    vlm_model,
+)
+
 
 def get_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--epsilon",       type=float, default=0.2)
-    p.add_argument("--total-steps",   type=int,   default=50_000)
-    p.add_argument("--warmup-steps",  type=int,   default=20_000)
-    p.add_argument("--seed",          type=int,   default=0)
-    p.add_argument("--task",          type=str,   default="short_horizon")
-    p.add_argument("--max-episode-steps", type=int, default=10)
+    p.add_argument("--epsilon",            type=float, default=0.2)
+    p.add_argument("--total-steps",        type=int,   default=50_000)
+    p.add_argument("--warmup-steps",       type=int,   default=20_000)
+    p.add_argument("--seed",               type=int,   default=0)
+    p.add_argument("--task",               type=str,   default="short_horizon")
+    p.add_argument("--max-episode-steps",  type=int,   default=10)
 
     # 颜色配置
-    p.add_argument("--yaml-path",     type=str,   default=None,
-                   help="Lab2 vision_config.yaml路径（自动加载颜色）")
-    p.add_argument("--colors",        type=str,   nargs="+", default=None,
-                   help="手动指定颜色列表（覆盖yaml），例如 --colors red green blue")
+    p.add_argument("--yaml-path",          type=str,   default=None)
+    p.add_argument("--colors",             type=str,   nargs="+", default=None)
 
     # SAC
-    p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--buffer-size",   type=int,   default=50_000)
-    p.add_argument("--batch-size",    type=int,   default=256)
-    p.add_argument("--learning-starts",type=int,  default=1000)
+    p.add_argument("--learning-rate",      type=float, default=3e-4)
+    p.add_argument("--buffer-size",        type=int,   default=50_000)
+    p.add_argument("--batch-size",         type=int,   default=256)
+    p.add_argument("--learning-starts",    type=int,   default=1000)
 
-    # LLM
-    p.add_argument("--model",         type=str,   default="deepseek-v3")
-    p.add_argument("--api-key",       type=str,
-                   default=os.environ.get("LLM_API_KEY", ""))
-    p.add_argument("--base-url",      type=str,
-                   default=os.environ.get("LLM_BASE_URL", None))
-    p.add_argument("--n-candidates",  type=int,   default=3)
+    # LLM 探索策略（训练时引导 SAC 探索）
+    p.add_argument("--model",              type=str,   default=llm_model(),
+                   help="LLM 探索模型；默认 LLM_MODEL")
+    p.add_argument("--api-key",            type=str,
+                   default=llm_api_key(),
+                   help="LLM API Key（ε>0 时必填；默认 LLM_API_KEY）")
+    p.add_argument("--base-url",           type=str,
+                   default=llm_base_url(),
+                   help="LLM 网关；默认 LLM_BASE_URL")
+    p.add_argument("--n-candidates",       type=int,   default=3)
+
+    # VLM 感知（真机评估时用，训练时不调用；与 LLM 密钥/网关完全独立）
+    p.add_argument("--vlm-api-key",        type=str,
+                   default=vlm_api_key(),
+                   help="VLM API Key（默认 VLM_API_KEY，与 LLM 分开）")
+    p.add_argument("--vlm-model",          type=str,   default=vlm_model(),
+                   help="VLM 模型；默认 VLM_MODEL")
+    p.add_argument("--vlm-base-url",       type=str,   default=vlm_base_url(),
+                   help="VLM 网关；默认 VLM_BASE_URL（不设则由各 VLM preset 决定）")
+    p.add_argument("--calib-yaml",         type=str,   default=None,
+                   help="Lab2 标定 yaml（真机评估用）")
 
     # 实验
-    p.add_argument("--ablation",      action="store_true")
-    p.add_argument("--seeds",         type=int, nargs="+", default=[0,1,2])
-    p.add_argument("--epsilons",      type=float, nargs="+",
+    p.add_argument("--ablation",           action="store_true")
+    p.add_argument("--seeds",              type=int, nargs="+", default=[0,1,2])
+    p.add_argument("--epsilons",           type=float, nargs="+",
                    default=[0.0, 0.2, 0.5])
 
     # 输出
-    p.add_argument("--log-dir",       type=str,   default="./logs")
-    p.add_argument("--save-freq",     type=int,   default=5000)
-    p.add_argument("--eval-freq",     type=int,   default=5000)
-    p.add_argument("--eval-episodes", type=int,   default=10)
-    p.add_argument("--device",        type=str,   default="auto")
-    p.add_argument("--verbose",       type=int,   default=1)
+    p.add_argument("--log-dir",            type=str,   default="./logs")
+    p.add_argument("--save-freq",          type=int,   default=5000)
+    p.add_argument("--eval-freq",          type=int,   default=5000)
+    p.add_argument("--eval-episodes",      type=int,   default=10)
+    p.add_argument("--device",             type=str,   default="auto")
+    p.add_argument("--verbose",            type=int,   default=1)
     return p.parse_args()
 
 
@@ -90,25 +99,17 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC, make_sac_kwargs
 
-    print(f"\n{'='*55}")
-    print(f"  Training: {run_name}  (ε={epsilon}, seed={seed})")
-    print(f"{'='*55}\n")
+    print(f"\n{'='*58}")
+    print(f"  Training : {run_name}  (ε={epsilon}, seed={seed})")
+    print(f"  [感知升级] 训练阶段用 Gazebo GT，真机评估用 VLM")
+    print(f"{'='*58}\n")
 
-    # ── 颜色配置 ──────────────────────────────────────────────────
     color_cfg = ColorConfig(yaml_path=args.yaml_path)
     if args.colors:
-        # 如果手动指定了颜色，过滤只保留这些颜色
-        color_cfg.colors = [c for c in args.colors
-                            if c in color_cfg.colors or True]
+        color_cfg.colors = [c for c in args.colors if c in color_cfg.colors or True]
         color_cfg._build_index()
-        print(f"[Train] 使用指定颜色：{color_cfg.colors}")
-    else:
-        print(f"[Train] 从yaml加载颜色：{color_cfg.colors}")
+    print(f"[Train] 颜色: {color_cfg.colors}  (N={color_cfg.n_colors})")
 
-    N = color_cfg.n_colors
-    print(f"[Train] 颜色总数 N={N}")
-
-    # ── 目录 ──────────────────────────────────────────────────────
     log_dir  = Path(args.log_dir) / run_name
     ckpt_dir = log_dir / "checkpoints"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -120,116 +121,104 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     if not rospy.core.is_initialized():
         rospy.init_node("explorllm_train", anonymous=True)
 
-    # ── 环境 ──────────────────────────────────────────────────────
+    N = color_cfg.n_colors
+
     train_env = Monitor(
         SagittariusPickPlaceEnv(
-            task=args.task,
-            max_steps=args.max_episode_steps,
-            color_config=color_cfg,
-        ),
-        filename=str(log_dir / "train_monitor.csv"),
-    )
+            task=args.task, max_steps=args.max_episode_steps,
+            color_config=color_cfg),
+        filename=str(log_dir / "train_monitor.csv"))
 
     eval_env = Monitor(
         SagittariusPickPlaceEnv(
-            task=args.task,
-            max_steps=args.max_episode_steps,
-            color_config=color_cfg,
-            noise_sigma=0.0,
-        ),
-        filename=str(log_dir / "eval_monitor.csv"),
-    )
+            task=args.task, max_steps=args.max_episode_steps,
+            color_config=color_cfg, noise_sigma=0.0),
+        filename=str(log_dir / "eval_monitor.csv"))
 
-    # ── LLM策略 ──────────────────────────────────────────────────
+    # LLM 探索策略（文字接口，训练阶段使用）
+    # 密钥可从环境变量 LLM_API_KEY 读取，无需在命令行传 --api-key
     llm_policy = None
-    if epsilon > 0.0 and args.api_key:
+    _llm_key = (args.api_key or llm_api_key()).strip()
+    if epsilon > 0.0 and _llm_key:
         from llm.llm_policy import LLMExplorationPolicy
         llm_policy = LLMExplorationPolicy(
-            api_key=args.api_key,
+            api_key=args.api_key or None,
             base_url=args.base_url,
-            model=args.model,
-            epsilon=epsilon,
-            n_candidates=args.n_candidates,
-            color_config=color_cfg,
-        )
+            model=args.model, epsilon=epsilon,
+            n_candidates=args.n_candidates, color_config=color_cfg)
+        print(f"[Train] LLM 探索策略：model={args.model}, ε={epsilon}")
     elif epsilon > 0.0:
-        print("[Train] 警告：ε>0 但没有API Key，以ε=0运行。")
+        print("[Train] 警告：ε>0 但无 API Key（请设 LLM_API_KEY 或 --api-key），以 ε=0 运行")
 
-    # ── SAC模型 ──────────────────────────────────────────────────
     policy_kwargs = make_sac_kwargs(n_colors=N, features_dim=128)
-
     model = ExploRLLMSAC(
-        policy="MlpPolicy",
-        env=train_env,
-        llm_policy=llm_policy,
-        warmup_steps=args.warmup_steps,
-        n_colors=N,
-        learning_rate=args.learning_rate,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
+        policy="MlpPolicy", env=train_env,
+        llm_policy=llm_policy, warmup_steps=args.warmup_steps,
+        n_colors=N, learning_rate=args.learning_rate,
+        buffer_size=args.buffer_size, batch_size=args.batch_size,
         learning_starts=args.learning_starts,
-        policy_kwargs=policy_kwargs,
-        device=args.device,
-        verbose=args.verbose,
-        tensorboard_log=str(log_dir / "tb"),
-        seed=seed,
-    )
+        policy_kwargs=policy_kwargs, device=args.device,
+        verbose=args.verbose, tensorboard_log=str(log_dir/"tb"), seed=seed)
 
     params = sum(p.numel() for p in model.policy.parameters())
     print(f"[Train] 模型参数量：{params:,}")
 
-    # ── 回调 ──────────────────────────────────────────────────────
-    class EvalCallback(BaseCallback):
+    class EvalCB(BaseCallback):
         def __init__(self):
             super().__init__()
             self._results = []
-            self._last_eval = 0
+            self._last = 0
 
         def _on_step(self):
-            if self.num_timesteps - self._last_eval >= args.eval_freq:
-                self._last_eval = self.num_timesteps
-                successes, rewards = 0, []
+            if self.num_timesteps - self._last >= args.eval_freq:
+                self._last = self.num_timesteps
+                s, r = 0, []
                 for _ in range(args.eval_episodes):
-                    obs, _ = eval_env.reset()
-                    done = trunc = False
-                    ep_r = 0
-                    while not (done or trunc):
-                        a, _ = self.model.predict(obs, deterministic=True)
-                        obs, r, done, trunc, _ = eval_env.step(a)
-                        ep_r += r
-                    rewards.append(ep_r)
-                    if done: successes += 1
-                sr = successes / args.eval_episodes
-                mr = float(np.mean(rewards))
-                print(f"\n[Eval@{self.num_timesteps}] "
-                      f"success={sr:.2%}  reward={mr:.3f}\n")
+                    o, _ = eval_env.reset()
+                    done = tr = False; ep = 0
+                    while not (done or tr):
+                        a, _ = self.model.predict(o, deterministic=True)
+                        o, rr, done, tr, _ = eval_env.step(a); ep += rr
+                    r.append(ep)
+                    if done: s += 1
+                sr = s / args.eval_episodes
+                mr = float(np.mean(r))
+                print(f"\n[Eval@{self.num_timesteps}] success={sr:.2%}  "
+                      f"reward={mr:.3f}\n")
                 self._results.append({"step": self.num_timesteps,
-                                      "success_rate": sr,
-                                      "mean_reward": mr})
-                with open(log_dir / "eval_results.json", "w") as f:
+                                      "success_rate": sr, "mean_reward": mr})
+                with open(log_dir/"eval_results.json","w") as f:
                     json.dump(self._results, f, indent=2)
             return True
 
     callbacks = [
-        EvalCallback(),
+        EvalCB(),
         CheckpointCallback(save_freq=args.save_freq,
-                           save_path=str(ckpt_dir),
-                           name_prefix="sac"),
+                           save_path=str(ckpt_dir), name_prefix="sac"),
     ]
 
-    # ── 训练 ──────────────────────────────────────────────────────
     print(f"[Train] 开始训练 {args.total_steps} 步...")
     t0 = time.time()
     try:
         model.learn(total_timesteps=args.total_steps, callback=callbacks)
     except KeyboardInterrupt:
-        print("\n[Train] 用户中断。")
+        print("\n[Train] 中断")
 
     elapsed = time.time() - t0
     print(f"[Train] 完成，耗时 {elapsed/3600:.1f}h")
-
     model.save(str(log_dir / "final_model"))
-    print(f"[Train] 模型已保存到 {log_dir}/final_model.zip")
+    print(f"[Train] 模型保存到 {log_dir}/final_model.zip")
+
+    # 保存 VLM 相关配置（便于 eval.py 直接读取）
+    vlm_config = {
+        "vlm_model":   args.vlm_model,
+        "vlm_base_url":args.vlm_base_url,
+        "calib_yaml":  args.calib_yaml,
+        "colors":      color_cfg.colors,
+    }
+    with open(log_dir/"vlm_config.json","w") as f:
+        json.dump(vlm_config, f, indent=2)
+    print(f"[Train] VLM 配置保存到 {log_dir}/vlm_config.json")
 
     train_env.close()
     eval_env.close()

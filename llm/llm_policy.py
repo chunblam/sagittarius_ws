@@ -9,6 +9,13 @@ llm_policy.py
   - prompt里描述的物体从3种颜色扩展到N种颜色
   - prompt里现在包含桶的位置（因为桶是随机的，LLM需要知道桶在哪）
   - object_index映射更新：前N个是方块，后N个是桶
+
+凭证、网关与模型名（勿写入仓库，用环境变量或 .env）：
+  - api_key / base_url：调用方优先；为空则读 LLM_API_KEY、LLM_BASE_URL
+  - model：调用方可传 preset 名；为空则读 LLM_MODEL（默认 deepseek-v3）
+  - base_url 最终仍可由 MODEL_PRESETS 补全
+
+本地示例：  export LLM_API_KEY='...'  export LLM_MODEL='deepseek-v3'
 """
 
 import os
@@ -116,6 +123,45 @@ def _create_openai_client(api_key: str, base_url: Optional[str]):
 
 from configs.color_config import ColorConfig, get_color_config
 
+# 与 train.py 中 argparse 默认值保持一致，便于只配环境变量、不把密钥写进命令行
+LLM_API_KEY_ENV = "LLM_API_KEY"
+LLM_BASE_URL_ENV = "LLM_BASE_URL"
+
+
+def _resolve_llm_api_key(explicit: Optional[str]) -> str:
+    """显式 api_key 非空则用之，否则读环境变量 LLM_API_KEY。"""
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    return os.environ.get(LLM_API_KEY_ENV, "").strip()
+
+
+def _resolve_llm_model_name(explicit: Optional[str]) -> str:
+    """显式 model 非空则用之，否则读 env_config.llm_model()。"""
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    try:
+        from env_config import llm_model
+        return llm_model()
+    except ImportError:
+        return os.environ.get("LLM_MODEL", "").strip() or "deepseek-v3"
+
+
+def _resolve_llm_base_url(
+    explicit: Optional[str],
+    preset_base_url: Optional[str],
+) -> Optional[str]:
+    """
+    显式 base_url 非空则用之；
+    否则读 LLM_BASE_URL；
+    再否则用 preset（如 deepseek 官方地址）；gpt-4o-mini 等可为 None（走 OpenAI 默认）。
+    """
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env_u = os.environ.get(LLM_BASE_URL_ENV, "").strip()
+    if env_u:
+        return env_u
+    return preset_base_url
+
 
 MODEL_PRESETS = {
     "deepseek-v3": {"base_url": "https://api.deepseek.com/v1",
@@ -198,12 +244,16 @@ class LLMExplorationPolicy:
     """
     升级版LLM探索策略。
     支持任意多种颜色，桶的位置是动态的。
+
+    api_key / base_url 可传 None 或空字符串，此时从环境变量
+    LLM_API_KEY、LLM_BASE_URL 读取。
+    model 可传 None 或空字符串，此时从 LLM_MODEL 读取（见 env_config / .env）。
     """
 
     def __init__(self,
-                 api_key:      str,
-                 base_url:     str = None,
-                 model:        str = "deepseek-v3",
+                 api_key:      Optional[str] = None,
+                 base_url:     Optional[str] = None,
+                 model:        Optional[str] = None,
                  epsilon:      float = 0.2,
                  n_candidates: int = 3,
                  color_config: ColorConfig = None):
@@ -212,17 +262,24 @@ class LLMExplorationPolicy:
         self.n_candidates = n_candidates
         self.color_cfg    = color_config or get_color_config()
 
-        # 解析model preset
+        model = _resolve_llm_model_name(model)
+
+        # 解析 model preset（得到官方默认 base_url，可被环境变量覆盖）
+        preset_base: Optional[str] = None
         if model in MODEL_PRESETS:
-            preset   = MODEL_PRESETS[model]
-            base_url = base_url or preset["base_url"]
-            model    = preset["model"]
+            preset        = MODEL_PRESETS[model]
+            preset_base   = preset["base_url"]
+            model         = preset["model"]
+
+        api_key_resolved = _resolve_llm_api_key(api_key)
+        base_url_resolved = _resolve_llm_base_url(base_url, preset_base)
         self.model = model
 
         # client 统一接口：self._client.chat.completions.create(...)
         # - 日常：openai>=1.x（默认）
         # - 实验室若只能装 openai==0.9.1：设置 USE_OPENAI_LEGACY=1 或自动回落
-        self._client = _create_openai_client(api_key=api_key, base_url=base_url)
+        self._client = _create_openai_client(
+            api_key=api_key_resolved, base_url=base_url_resolved)
 
         self._code_cache: Dict[str, str] = {}
         print(f"[LLM] model={self.model}, ε={self.epsilon}, "
