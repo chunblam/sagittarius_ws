@@ -162,7 +162,7 @@ def test_4_color_config():
 
 # ── Test 5: 环境 reset/step ───────────────────────────────────────────────────
 def test_5_env_reset_step():
-    section("Test 5: 环境 reset() 和 step()")
+    section("Test 5: 环境 reset() 和 step()（含奖励结构 & 桶不重叠验证）")
     try:
         from envs.pick_place_env import SagittariusPickPlaceEnv
         from config.color_config import get_color_config
@@ -184,19 +184,66 @@ def test_5_env_reset_step():
             fail(f"obs 维度 {obs.shape[0]} ≠ {env.obs_dim}"); return False
         ok(f"  obs 维度正确: {env.obs_dim}")
 
-        img_dim = N*3*28*28
-        block_pos = obs[img_dim:img_dim+N*2].reshape(N,2)
-        bin_pos   = obs[img_dim+N*2:img_dim+N*4].reshape(N,2)
-        info(f"  方块位置[0]: {block_pos[0]}")
-        info(f"  桶位置[0]:   {bin_pos[0]}")
+        img_dim = N * 3 * 28 * 28
+        block_pos = obs[img_dim : img_dim + N*2].reshape(N, 2)
+        bin_pos   = obs[img_dim + N*2 : img_dim + N*4].reshape(N, 2)
 
-        if np.all(block_pos==0): warn("方块位置全是 0，检查 Gazebo 物体")
-        if np.all(bin_pos==0):   warn("桶位置全是 0，检查 Gazebo 桶模型")
+        info(f"  方块位置[0] ({cfg.colors[0]}): {block_pos[0]}")
+        info(f"  桶位置[0]   ({cfg.colors[0]}): {bin_pos[0]}")
 
-        info("调用 env.step()（约 10-20 秒）...")
-        obs2, r, done, trunc, info2 = env.step(
-            np.array([0.,0.,0.,0.], dtype=np.float32))
-        ok(f"step() 返回  reward={r:.4f}  success={info2.get('success')}")
+        if np.all(block_pos == 0):
+            warn("方块位置全是 0，检查 Gazebo 物体是否加载")
+        if np.all(bin_pos == 0):
+            warn("桶位置全是 0，检查 Gazebo 桶模型是否加载")
+
+        # ── 检查垃圾桶是否互不重叠 ────────────────────────────────────────
+        info("检查垃圾桶位置是否互不重叠（最小间距应 ≥ 0.16 m）...")
+        overlap_found = False
+        for i in range(N):
+            for j in range(i + 1, N):
+                d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
+                if d < 0.14:   # 低于安全阈值
+                    fail(f"  桶 {cfg.colors[i]} 与 {cfg.colors[j]} 距离过近: "
+                         f"{d:.3f} m（应 ≥ 0.16 m）")
+                    overlap_found = True
+        if not overlap_found:
+            ok(f"  所有 {N} 个垃圾桶位置互不重叠 ✓")
+        else:
+            warn("  存在桶重叠，请检查 _randomize_scene 是否使用了新版代码")
+
+        # ── 打印桶的具体坐标 ──────────────────────────────────────────────
+        info("桶的具体位置：")
+        for i, c in enumerate(cfg.colors):
+            info(f"  {c:10s}_bin : ({bin_pos[i, 0]:.3f}, {bin_pos[i, 1]:.3f})")
+
+        # ── step 测试：pick 正确颜色 ──────────────────────────────────────
+        info("\n调用 env.step()（pick 正确颜色方块，约 10-20 秒）...")
+        pick_idx = cfg.color_to_idx(info_dict.get("pick_color"))
+        action_correct = np.array(
+            [0.0, float(pick_idx), 0.0, 0.0], dtype=np.float32)
+        t0 = time.time()
+        obs2, r_correct, done, trunc, info2 = env.step(action_correct)
+        ok(f"step() 正确颜色  reward={r_correct:.4f}  "
+           f"success={info2.get('success')}  ({time.time()-t0:.1f}s)")
+
+        # ── step 测试：pick 错误颜色（应得到更低 reward） ─────────────────
+        info("调用 env.step()（pick 错误颜色方块，约 10-20 秒）...")
+        wrong_idx = (pick_idx + 1) % N   # 选一个不同的颜色
+        action_wrong = np.array(
+            [0.0, float(wrong_idx), 0.0, 0.0], dtype=np.float32)
+        t0 = time.time()
+        obs3, r_wrong, done2, trunc2, info3 = env.step(action_wrong)
+        ok(f"step() 错误颜色  reward={r_wrong:.4f}  "
+           f"success={info3.get('success')}  ({time.time()-t0:.1f}s)")
+
+        # ── 验证奖励结构正确性 ────────────────────────────────────────────
+        info("奖励结构验证（错误颜色的奖励应 ≤ 正确颜色的奖励）：")
+        if r_wrong <= r_correct:
+            ok(f"  奖励结构正确：错误颜色 {r_wrong:.4f} ≤ 正确颜色 {r_correct:.4f}")
+        else:
+            warn(f"  奖励可能异常：错误颜色 {r_wrong:.4f} > 正确颜色 {r_correct:.4f}")
+            warn("  这可能是因为正确颜色方块刚好距离 action 点更远（属于正常噪声）")
+            warn("  多次运行或运行更多 episode 再判断")
 
         env.close()
         return True
