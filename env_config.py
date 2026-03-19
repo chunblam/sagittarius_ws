@@ -7,9 +7,9 @@
   - import 本模块一次即完成 load_dotenv，train / eval / test_all 无需重复粘贴；
   - 6 个环境变量名与默认值只维护此处，避免拼写不一致或只改了一处代码。
 
-环境变量（共 6 个，与 .env.example 一致）：
-  LLM_API_KEY, LLM_BASE_URL, LLM_MODEL   — 训练探索策略（llm_policy）
-  VLM_API_KEY, VLM_BASE_URL, VLM_MODEL   — 真机视觉感知（camera_perception）
+环境变量：
+  LLM_* / VLM_*（各 3 个）— 见下方常量名
+  EXPLORELLM_MOVEIT_NS — MoveIt / robot_description 所在 ROS 命名空间（默认 sgr532）
 """
 from __future__ import annotations
 
@@ -35,6 +35,10 @@ VLM_MODEL_ENV = "VLM_MODEL"
 
 DEFAULT_LLM_MODEL = "deepseek-v3"
 DEFAULT_VLM_MODEL = "qwen-vl"
+
+# Sagittarius Gazebo 常见 launch 将 URDF/MoveIt 挂在 /sgr532/ 下（如 /sgr532/robot_description）
+MOVEIT_NS_ENV = "EXPLORELLM_MOVEIT_NS"
+DEFAULT_MOVEIT_NS = "sgr532"
 
 
 def _strip_or_none(key: str) -> Optional[str]:
@@ -69,3 +73,16 @@ def vlm_base_url() -> Optional[str]:
 def vlm_model() -> str:
     v = _strip_or_none(VLM_MODEL_ENV)
     return v if v else DEFAULT_VLM_MODEL
+
+
+def moveit_commander_ns() -> str:
+    """
+    供 moveit_commander.MoveGroupCommander(..., ns=...) 使用。
+    与 rosparam 中 robot_description 前缀一致，例如 /sgr532/robot_description → 返回 \"sgr532\"。
+    若 launch 把参数放在根命名空间，可将 EXPLORELLM_MOVEIT_NS 设为 root / none / 空。
+    """
+    raw = os.environ.get(MOVEIT_NS_ENV, DEFAULT_MOVEIT_NS)
+    s = str(raw).strip()
+    if s.lower() in ("", "/", ".", "root", "none", "~", "global"):
+        return ""
+    return s.strip("/")

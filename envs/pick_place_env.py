@@ -31,6 +31,7 @@ from gymnasium import spaces
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import env_config  # noqa: F401 — MoveIt 命名空间 EXPLORELLM_MOVEIT_NS
 import rospy
 from gazebo_msgs.msg import ModelStates
 from gazebo_msgs.srv import SetModelState
@@ -160,8 +161,16 @@ class SagittariusPickPlaceEnv(gym.Env):
             rospy.init_node("explorllm_env", anonymous=True)
 
         moveit_commander.roscpp_initialize(sys.argv)
-        self._moveit_arm     = moveit_commander.MoveGroupCommander("sagittarius_arm")
-        self._moveit_gripper = moveit_commander.MoveGroupCommander("sagittarius_gripper")
+        ns = env_config.moveit_commander_ns()
+        if ns:
+            self._moveit_arm = moveit_commander.MoveGroupCommander(
+                "sagittarius_arm", ns=ns)
+            self._moveit_gripper = moveit_commander.MoveGroupCommander(
+                "sagittarius_gripper", ns=ns)
+        else:
+            self._moveit_arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
+            self._moveit_gripper = moveit_commander.MoveGroupCommander(
+                "sagittarius_gripper")
 
         self._moveit_arm.set_goal_position_tolerance(0.005)
         self._moveit_arm.set_goal_orientation_tolerance(0.02)

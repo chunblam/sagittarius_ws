@@ -116,13 +116,20 @@ def test_3_moveit():
     try:
         import moveit_commander
         moveit_commander.roscpp_initialize(sys.argv)
-        arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
+        ns = env_config.moveit_commander_ns()
+        if ns:
+            arm = moveit_commander.MoveGroupCommander("sagittarius_arm", ns=ns)
+            grip = moveit_commander.MoveGroupCommander("sagittarius_gripper", ns=ns)
+        else:
+            arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
+            grip = moveit_commander.MoveGroupCommander("sagittarius_gripper")
+        info(f"MoveIt ns={repr(ns) if ns else '/ (root)'}")
         ok(f"sagittarius_arm  参考坐标系: {arm.get_planning_frame()}")
         ok(f"  末端执行器: {arm.get_end_effector_link()}")
         pose = arm.get_current_pose()
         ok(f"  末端: x={pose.pose.position.x:.3f}, "
            f"y={pose.pose.position.y:.3f}, z={pose.pose.position.z:.3f}")
-        moveit_commander.MoveGroupCommander("sagittarius_gripper")
+        _ = grip  # 连接成功即可
         ok("sagittarius_gripper 连接成功")
         return True
     except Exception as e:

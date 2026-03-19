@@ -68,7 +68,19 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。
 
-### 3. 验证环境
+### 3. MoveIt 命名空间（SGR532 仿真默认）
+
+若 `rosparam list` 中 `robot_description` 在 **`/sgr532/robot_description`**（而不是根目录），本仓库已默认使用命名空间 **`sgr532`**，无需配置。
+
+若你的 launch 把模型挂在根命名空间，可在 `.env` 中设置：
+
+```bash
+EXPLORELLM_MOVEIT_NS=root
+```
+
+（或 `none` / 留空含义见 `env_config.moveit_commander_ns` 文档字符串。）
+
+### 4. 验证环境
 
 ```bash
 # 先在另一个终端启动Gazebo
@@ -82,7 +94,7 @@ python test_all.py
 python test_all.py --test 2
 ```
 
-### 4. 开始训练
+### 5. 开始训练
 
 ```bash
 # 纯SAC（不需要API Key，用于验证训练循环能跑通）
