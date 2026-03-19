@@ -98,7 +98,7 @@ class ColorConfig:
             os.path.expanduser(
                 "~/sagittarius_ws/src/"
                 "sagittarius_object_color_detector/config/vision_config.yaml"),
-            "./configs/vision_config.yaml",
+            "./config/vision_config.yaml",
         ]
         for p in candidates:
             if os.path.exists(p):

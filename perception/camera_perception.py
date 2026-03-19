@@ -539,7 +539,7 @@ class VLMPerception:
 
         # 初始化返回结构（颜色列表从 color_config 动态获取）
         try:
-            from configs.color_config import get_color_config
+            from config.color_config import get_color_config
             known_colors = get_color_config().colors
         except Exception:
             known_colors = []
@@ -735,7 +735,7 @@ class HSVPerceptionFallback:
     BIN_MIN_AREA   = 2500
 
     def __init__(self, color_config=None, calib=None):
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
         self.color_cfg = color_config or get_color_config()
         self.calib = calib or dict(DEFAULT_CALIB)
         self._latest_image = None
@@ -825,7 +825,7 @@ class AdaptivePerception:
             calib=calib,
             **kwargs,
         )
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
         self._hsv = HSVPerceptionFallback(
             color_config=color_config or get_color_config(),
             calib=calib,

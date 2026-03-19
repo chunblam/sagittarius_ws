@@ -95,7 +95,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
-    from configs.color_config import ColorConfig
+    from config.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC, make_sac_kwargs
 

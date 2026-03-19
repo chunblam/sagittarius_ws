@@ -59,7 +59,7 @@ def get_args():
 def eval_sim(model_path: str, n_episodes: int, task: str,
              colors=None, yaml_path=None):
     import rospy
-    from configs.color_config import ColorConfig
+    from config.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC
 
@@ -135,7 +135,7 @@ def eval_real_robot(args, n_episodes: int, task: str,
         roslaunch sagittarius_moveit demo_true.launch
     """
     import rospy
-    from configs.color_config import ColorConfig
+    from config.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
     from agents.custom_sac import ExploRLLMSAC
     from perception.camera_perception import AdaptivePerception

@@ -210,7 +210,7 @@ class ExploRLLMSAC(SAC):
 
     def _parse_obs(self, obs: np.ndarray) -> dict:
         """从flat observation重建结构化字典，供LLM使用。"""
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
         cfg = get_color_config()
         N   = cfg.n_colors
 

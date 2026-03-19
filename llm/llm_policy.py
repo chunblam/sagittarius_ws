@@ -121,7 +121,7 @@ def _create_openai_client(api_key: str, base_url: Optional[str]):
         _openai_legacy.api_base = base_url  # type: ignore[attr-defined]
     return _LegacyClient()
 
-from configs.color_config import ColorConfig, get_color_config
+from config.color_config import ColorConfig, get_color_config
 
 # 与 train.py 中 argparse 默认值保持一致，便于只配环境变量、不把密钥写进命令行
 LLM_API_KEY_ENV = "LLM_API_KEY"

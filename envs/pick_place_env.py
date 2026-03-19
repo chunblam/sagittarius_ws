@@ -40,7 +40,7 @@ from std_srvs.srv import Empty
 import moveit_commander
 from geometry_msgs.msg import PoseStamped
 
-from configs.color_config import ColorConfig, get_color_config
+from config.color_config import ColorConfig, get_color_config
 
 
 # ── 场景参数 ──────────────────────────────────────────────────────────────────

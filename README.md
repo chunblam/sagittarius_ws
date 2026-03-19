@@ -18,7 +18,7 @@
 
 ```
 sagittarius_ws/
-├── configs/
+├── config/
 │   └── color_config.py          ← 颜色配置（自动从Lab2 yaml加载）
 ├── envs/
 │   └── pick_place_env.py     ← Gazebo gym.Env 包装器（核心）

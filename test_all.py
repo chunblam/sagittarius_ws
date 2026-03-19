@@ -69,7 +69,7 @@ def test_1_ros_connection():
 # ── Test 2: Gazebo 物体检测 ───────────────────────────────────────────────────
 def test_2_gazebo_objects():
     section("Test 2: Gazebo物体检测（6色×2类=12个）")
-    from configs.color_config import get_color_config
+    from config.color_config import get_color_config
     cfg = get_color_config()
     info(f"颜色配置: {cfg.colors}")
 
@@ -135,7 +135,7 @@ def test_3_moveit():
 def test_4_color_config():
     section("Test 4: 颜色配置（ColorConfig）")
     try:
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
         cfg = get_color_config()
         ok(f"颜色配置: {cfg.colors}  ({cfg.n_colors} 种)")
         for c in cfg.colors:
@@ -154,7 +154,7 @@ def test_5_env_reset_step():
     section("Test 5: 环境 reset() 和 step()")
     try:
         from envs.pick_place_env import SagittariusPickPlaceEnv
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
         import numpy as np
 
         cfg = get_color_config()
@@ -221,7 +221,7 @@ def test_6_vlm_perception():
 
     try:
         from perception.camera_perception import AdaptivePerception
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
 
         cfg    = get_color_config()
         camera = AdaptivePerception(
@@ -292,7 +292,7 @@ def test_7_llm_api():
     info(f"探索策略模型: {model}（.env / LLM_MODEL）")
     try:
         from llm.llm_policy import LLMExplorationPolicy
-        from configs.color_config import get_color_config
+        from config.color_config import get_color_config
 
         cfg    = get_color_config()
         policy = LLMExplorationPolicy(
