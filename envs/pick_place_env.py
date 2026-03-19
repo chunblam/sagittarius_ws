@@ -252,39 +252,101 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _randomize_scene(self):
         """
-        随机化所有方块和垃圾桶的位置。
+        随机化所有方块和垃圾桶的位置，保证同类物体互不重叠。
 
-        方块放在桌面左半区，桶放在右半区。
-        两个区域不重叠，互相不会碰撞。
-        同区域内的物体保持最小间距。
+        修复说明（对应截图中桶大量重叠的根因）：
+          1. 桶最小间距 0.10 → 0.16 m
+             空心长方体外廓对角线 ≈ sqrt(0.07²+0.07²) ≈ 0.099 m；
+             0.16 m 确保两桶边缘之间有约 6 cm 安全间距，不会物理穿透。
+          2. 桶的 y 区域扩展到 ±0.22 m（原 ±0.18 m 只有 0.36 m，
+             6 个桶需要约 6×0.16 = 0.96 m，空间根本不够）。
+          3. 尝试次数 50 → 100，减少随机失败概率。
+          4. 100 次仍失败时 fallback 到均匀网格摆放，
+             杜绝静默跳过 teleport（静默跳过是桶堆在 world 默认位置的直接原因）。
+          5. 方块间距保持 0.08 m（5 cm 方块，足够）。
         """
         rng = np.random.default_rng()
 
+        # ── 辅助：生成均匀网格位置（fallback 用） ────────────────────────
+        def _grid_positions(n: int, zone_x: tuple, zone_y: tuple,
+                            gap: float) -> list:
+            """在 zone 内生成最多 n 个均匀分布的网格坐标。"""
+            cols = max(1, int((zone_x[1] - zone_x[0]) / gap))
+            rows = max(1, int((zone_y[1] - zone_y[0]) / gap))
+            xs = np.linspace(zone_x[0] + gap / 2,
+                             zone_x[1] - gap / 2, min(cols, n))
+            ys = np.linspace(zone_y[0] + gap / 2,
+                             zone_y[1] - gap / 2,
+                             max(1, int(np.ceil(n / max(len(xs), 1)))))
+            pts = [(float(x), float(y)) for y in ys for x in xs]
+            return pts[:n]
+
         # ── 随机化方块 ────────────────────────────────────────────────────
         placed_blocks = []
-        for color in self.color_cfg.colors:
+        BLOCK_MIN_GAP = 0.08
+        for idx, color in enumerate(self.color_cfg.colors):
             name = block_name(color)
-            for _ in range(50):
+            placed = False
+            for _ in range(100):
                 x = rng.uniform(*BLOCK_ZONE_X)
                 y = rng.uniform(*BLOCK_ZONE_Y)
-                if all(np.linalg.norm([x-px, y-py]) > 0.08
+                if all(np.linalg.norm([x - px, y - py]) > BLOCK_MIN_GAP
                        for px, py in placed_blocks):
                     placed_blocks.append((x, y))
                     self._teleport(name, x, y, TABLE_Z + BLOCK_H / 2)
+                    placed = True
                     break
 
+            if not placed:
+                # Fallback：网格位置，不能静默跳过
+                grid = _grid_positions(
+                    len(self.color_cfg.colors),
+                    BLOCK_ZONE_X, BLOCK_ZONE_Y, BLOCK_MIN_GAP)
+                if idx < len(grid):
+                    x, y = grid[idx]
+                    placed_blocks.append((x, y))
+                    self._teleport(name, x, y, TABLE_Z + BLOCK_H / 2)
+                    rospy.logwarn(
+                        f"[Env] 方块 {color} 随机摆放失败，fallback 网格 "
+                        f"({x:.3f}, {y:.3f})")
+
         # ── 随机化垃圾桶 ──────────────────────────────────────────────────
+        # 关键参数：
+        #   BIN_MIN_GAP = 0.16 m（中心间距），空心长方体 0.07 m 边长，留 ~6 cm 边缘间隙
+        #   BIN_ZONE_Y_WIDE = ±0.22 m，扩展 y 方向以容纳 6 个桶
+        BIN_MIN_GAP    = 0.16
+        BIN_ZONE_Y_WIDE = (-0.22, 0.22)
+
         placed_bins = []
-        for color in self.color_cfg.colors:
+        for idx, color in enumerate(self.color_cfg.colors):
             name = bin_name(color)
-            for _ in range(50):
+            placed = False
+            for _ in range(100):
                 x = rng.uniform(*BIN_ZONE_X)
-                y = rng.uniform(*BIN_ZONE_Y)
-                if all(np.linalg.norm([x-px, y-py]) > 0.10
+                y = rng.uniform(*BIN_ZONE_Y_WIDE)
+                if all(np.linalg.norm([x - px, y - py]) > BIN_MIN_GAP
                        for px, py in placed_bins):
                     placed_bins.append((x, y))
                     self._teleport(name, x, y, TABLE_Z + BIN_H / 2)
+                    placed = True
                     break
+
+            if not placed:
+                # Fallback：网格位置，绝不静默跳过
+                grid = _grid_positions(
+                    len(self.color_cfg.colors),
+                    BIN_ZONE_X, BIN_ZONE_Y_WIDE, BIN_MIN_GAP)
+                if idx < len(grid):
+                    x, y = grid[idx]
+                    placed_bins.append((x, y))
+                    self._teleport(name, x, y, TABLE_Z + BIN_H / 2)
+                    rospy.logwarn(
+                        f"[Env] 垃圾桶 {color} 随机摆放失败，fallback 网格 "
+                        f"({x:.3f}, {y:.3f})")
+                else:
+                    rospy.logerr(
+                        f"[Env] 垃圾桶 {color} 无法摆放！网格也满了。"
+                        f"请减少颜色数量或扩大 BIN_ZONE。")
 
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
@@ -403,6 +465,12 @@ class SagittariusPickPlaceEnv(gym.Env):
         time.sleep(0.3)
 
     def _move_to_xy(self, x: float, y: float, z: float) -> bool:
+        """
+        规划并执行到目标位姿。
+        plan 失败直接返回 False。
+        execute 失败（异常或返回 False）也返回 False，
+        避免将"规划成功但执行失败"误报为 success=True 污染奖励信号。
+        """
         target = PoseStamped()
         target.header.frame_id = "world"
         target.pose.position.x = x
@@ -412,19 +480,51 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.set_start_state_to_current_state()
         self._moveit_arm.set_pose_target(
             target, self._moveit_arm.get_end_effector_link())
-        ok, traj, _, _ = self._moveit_arm.plan()
-        if ok:
-            self._moveit_arm.execute(traj, wait=True)
+        plan_ok, traj, _, _ = self._moveit_arm.plan()
+        if not plan_ok:
+            return False
+        try:
+            exec_result = self._moveit_arm.execute(traj, wait=True)
             time.sleep(0.2)
-        return ok
+            # 旧版 MoveIt Python API execute() 可能返回 None（视为成功）
+            return exec_result if isinstance(exec_result, bool) else True
+        except Exception as e:
+            rospy.logwarn(f"[Env] execute 失败: {e}")
+            return False
 
     def _execute_pick(self, x: float, y: float, color: str) -> bool:
+        """
+        完整 pick 原语：开爪 → 接近 → 下降 → 关爪 → 物理验证 → 抬起。
+
+        抓取物理验证：
+          关爪后等 Gazebo 物理引擎更新，检查目标方块 z 坐标。
+          被夹起时方块随末端抬升，z 应明显高于 TABLE_Z + BLOCK_H。
+          验证失败（方块仍在桌面）则开爪放弃，返回 False。
+          这确保 success=True 时方块确实被夹住，奖励信号可信。
+        """
+        # 抓取验证阈值：TABLE_Z + BLOCK_H + 0.025 m 保守裕量
+        GRASP_VERIFY_Z = TABLE_Z + BLOCK_H + 0.025
+
         self._open_gripper()
         if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
         if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):    return False
         self._close_gripper()
+
+        # ── 物理验证：方块是否被抬起 ───────────────────────────────────
+        time.sleep(0.25)   # 等 Gazebo 物理引擎稳定
+        block_z = self._get_pose(block_name(color))[2]
+        if block_z < GRASP_VERIFY_Z:
+            rospy.logwarn(
+                f"[Env] 抓取验证失败 {color}_block: z={block_z:.4f} "
+                f"< 阈值 {GRASP_VERIFY_Z:.4f}，开爪放弃")
+            self._open_gripper()
+            return False
+
         self._holding_color = color
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
+            self._open_gripper()
+            self._holding_color = None
+            return False
         return True
 
     def _execute_place(self, x: float, y: float) -> bool:
@@ -447,28 +547,69 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _compute_reward(self, primitive: int, color: str,
                         action_xy: np.ndarray, success: bool) -> float:
+        """
+        奖励函数（重写版）。
+
+        完整成功链 = 选对颜色方块 → 执行+抓取验证通过 → 放入正确桶 → 任务完成。
+        每个环节都有对应的奖励/惩罚，让 policy 清楚"差在哪一步"。
+
+        奖励结构
+        ──────────────────────────────────────────────────────────────────────
+        PICK 原语 (primitive == 0):
+          -dist(action_xy, pick_color 方块位置)   密集距离 shaping（始终对目标颜色算）
+          -0.5   color != pick_color              选了错误颜色方块，明确惩罚
+          +0.5   success and color==pick_color    正确颜色且物理验证通过
+          -0.2   not success                      运动/抓取失败
+
+        PLACE 原语 (primitive == 1):
+          -dist(action_xy, place_color 桶位置)    密集距离 shaping（始终对目标桶算）
+          -0.5   color != place_color             朝错误桶方向运动，惩罚
+          +2.0   success and 方块进入目标桶        放置成功
+          -0.2   not success                      运动失败
+          +3.0   _check_done()                    任务完成 terminal bonus（独立叠加）
+        ──────────────────────────────────────────────────────────────────────
+        """
         r = 0.0
 
-        if primitive == 0:  # pick
-            target_pos = self._get_block_pos(color)
-            dist = np.linalg.norm(action_xy - target_pos)
-            r += -dist
-            if success and color == self.pick_color:
-                r += 0.2   # 小bonus：抓对了颜色
+        if primitive == 0:  # ── PICK ──────────────────────────────────────
+            # 距离 shaping：action 相对目标方块（始终用任务指定颜色）
+            target_block_pos = self._get_block_pos(self.pick_color)
+            dist = float(np.linalg.norm(action_xy - target_block_pos))
+            r -= dist
 
-        elif primitive == 1:  # place
-            target_pos = self._get_bin_pos(self.place_color)
-            dist = np.linalg.norm(action_xy - target_pos)
-            r += -dist
-            if success:
-                # 检查方块是否真的进桶了
+            if color != self.pick_color:
+                # 选了错误颜色的方块：明确惩罚（原来只是少拿 0.2，现在主动扣）
+                r -= 0.5
+            else:
+                if success:
+                    # 正确颜色 + 物理验证通过（方块真的被抬起）
+                    r += 0.5
+                else:
+                    # 正确颜色但运动/抓取失败
+                    r -= 0.2
+
+        elif primitive == 1:  # ── PLACE ────────────────────────────────────
+            # 距离 shaping：action 相对目标桶（始终用任务指定颜色）
+            target_bin_pos = self._get_bin_pos(self.place_color)
+            dist = float(np.linalg.norm(action_xy - target_bin_pos))
+            r -= dist
+
+            if color != self.place_color:
+                # 朝错误颜色的桶方向运动：惩罚
+                r -= 0.5
+
+            if not success:
+                r -= 0.2
+            else:
+                # 运动成功：检查方块是否真的进入目标桶（0.07 m 半径内）
                 block_pos  = self._get_pose(block_name(self.pick_color))[:2]
                 bin_gt_pos = self._get_pose(bin_name(self.place_color))[:2]
-                if np.linalg.norm(block_pos - bin_gt_pos) < 0.06:
-                    r += 1.0   # 任务成功
+                if float(np.linalg.norm(block_pos - bin_gt_pos)) < 0.07:
+                    r += 2.0   # 放置成功
 
-        if not success:
-            r -= 0.2
+            # Terminal bonus：任务完全完成时单独叠加（与中间 shaping 量级分开）
+            if self._check_done():
+                r += 3.0
 
         return float(r)
 
