@@ -116,14 +116,18 @@ def test_3_moveit():
     try:
         import moveit_commander
         moveit_commander.roscpp_initialize(sys.argv)
-        ns = env_config.moveit_commander_ns()
-        if ns:
-            arm = moveit_commander.MoveGroupCommander("sagittarius_arm", ns=ns)
-            grip = moveit_commander.MoveGroupCommander("sagittarius_gripper", ns=ns)
+        mg_kw = env_config.moveit_move_group_commander_kwargs()
+        if mg_kw:
+            arm = moveit_commander.MoveGroupCommander("sagittarius_arm", **mg_kw)
+            grip = moveit_commander.MoveGroupCommander("sagittarius_gripper", **mg_kw)
         else:
             arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
             grip = moveit_commander.MoveGroupCommander("sagittarius_gripper")
-        info(f"MoveIt ns={repr(ns) if ns else '/ (root)'}")
+        ns = env_config.moveit_commander_ns()
+        info(
+            f"MoveIt ns={repr(ns) if ns else '/ (root)'}  "
+            f"robot_description={env_config.moveit_robot_description_param()}"
+        )
         ok(f"sagittarius_arm  参考坐标系: {arm.get_planning_frame()}")
         ok(f"  末端执行器: {arm.get_end_effector_link()}")
         pose = arm.get_current_pose()

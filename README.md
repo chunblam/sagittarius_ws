@@ -70,15 +70,26 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
-若 `rosparam list` 中 `robot_description` 在 **`/sgr532/robot_description`**（而不是根目录），本仓库已默认使用命名空间 **`sgr532`**，无需配置。
+若参数在 **`/sgr532/robot_description`**、MoveIt 话题在 **`/sgr532/move_group/...`**（`rostopic list | grep move_group` 可见），本仓库默认 **`EXPLORELLM_MOVEIT_NS=sgr532`**，代码会：
 
-若你的 launch 把模型挂在根命名空间，可在 `.env` 中设置：
+- 用绝对路径 **`/sgr532/robot_description`** 加载模型；
+- 用 **`ns=sgr532`** 连接 **`/sgr532/move_group`** action（仅 `ns` 或仅短路径在 Noetic 上常连不上）。
+
+可选：连接超时（秒，默认 30）：
+
+```bash
+EXPLORELLM_MOVEIT_WAIT=45
+```
+
+若 launch 使用**根**命名空间（`/robot_description` + `/move_group`），在 `.env` 中设置：
 
 ```bash
 EXPLORELLM_MOVEIT_NS=root
 ```
 
-（或 `none` / 留空含义见 `env_config.moveit_commander_ns` 文档字符串。）
+（`root` / `none` / 空 含义见 `env_config.moveit_commander_ns`。）
+
+**说明**：`/gazebo/...`、`/usb_cam/...` 等一般为全局话题，无需加 `sgr532` 前缀。
 
 ### 4. 验证环境
 

@@ -9,7 +9,8 @@
 
 环境变量：
   LLM_* / VLM_*（各 3 个）— 见下方常量名
-  EXPLORELLM_MOVEIT_NS — MoveIt / robot_description 所在 ROS 命名空间（默认 sgr532）
+  EXPLORELLM_MOVEIT_NS — 机器人/MoveIt 所在 ROS 命名空间（默认 sgr532）
+  EXPLORELLM_MOVEIT_WAIT — 连接 move_group action 超时秒数（默认 30）
 """
 from __future__ import annotations
 
@@ -36,9 +37,11 @@ VLM_MODEL_ENV = "VLM_MODEL"
 DEFAULT_LLM_MODEL = "deepseek-v3"
 DEFAULT_VLM_MODEL = "qwen-vl"
 
-# Sagittarius Gazebo 常见 launch 将 URDF/MoveIt 挂在 /sgr532/ 下（如 /sgr532/robot_description）
+# Sagittarius Gazebo 常见 launch：参数在 /sgr532/robot_description，move_group 在 /sgr532/move_group
 MOVEIT_NS_ENV = "EXPLORELLM_MOVEIT_NS"
+MOVEIT_WAIT_ENV = "EXPLORELLM_MOVEIT_WAIT"
 DEFAULT_MOVEIT_NS = "sgr532"
+DEFAULT_MOVEIT_WAIT_S = 30.0
 
 
 def _strip_or_none(key: str) -> Optional[str]:
@@ -77,12 +80,47 @@ def vlm_model() -> str:
 
 def moveit_commander_ns() -> str:
     """
-    供 moveit_commander.MoveGroupCommander(..., ns=...) 使用。
-    与 rosparam 中 robot_description 前缀一致，例如 /sgr532/robot_description → 返回 \"sgr532\"。
-    若 launch 把参数放在根命名空间，可将 EXPLORELLM_MOVEIT_NS 设为 root / none / 空。
+    MoveIt 命名空间短名（无斜杠），例如 sgr532。
+    与 rosparam 前缀一致：/sgr532/robot_description、话题 /sgr532/move_group/...
+    若 launch 使用根命名空间，将 EXPLORELLM_MOVEIT_NS 设为 root / none / 空。
     """
     raw = os.environ.get(MOVEIT_NS_ENV, DEFAULT_MOVEIT_NS)
     s = str(raw).strip()
     if s.lower() in ("", "/", ".", "root", "none", "~", "global"):
         return ""
     return s.strip("/")
+
+
+def moveit_robot_description_param() -> str:
+    """robot_description 在参数服务器上的绝对路径，如 /sgr532/robot_description。"""
+    ns = moveit_commander_ns()
+    if not ns:
+        return "/robot_description"
+    return f"/{ns}/robot_description"
+
+
+def moveit_move_group_commander_kwargs() -> dict:
+    """
+    传给 MoveGroupCommander(..., **kwargs) 的额外关键字。
+
+    在命名空间下必须同时：
+      - robot_description 用绝对路径（否则 C++ 侧解析不到 /ns/robot_description）；
+      - ns 与 move_group action 所在空间一致（否则连不上 /ns/move_group）。
+    根命名空间时返回空 dict，由调用方使用默认 MoveGroupCommander(name)。
+    """
+    ns = moveit_commander_ns()
+    if not ns:
+        return {}
+    raw_wait = os.environ.get(MOVEIT_WAIT_ENV, "")
+    if raw_wait.strip():
+        try:
+            wait_s = float(raw_wait.strip())
+        except ValueError:
+            wait_s = DEFAULT_MOVEIT_WAIT_S
+    else:
+        wait_s = DEFAULT_MOVEIT_WAIT_S
+    return {
+        "robot_description": f"/{ns}/robot_description",
+        "ns": ns,
+        "wait_for_servers": wait_s,
+    }

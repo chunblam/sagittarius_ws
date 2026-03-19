@@ -161,12 +161,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             rospy.init_node("explorllm_env", anonymous=True)
 
         moveit_commander.roscpp_initialize(sys.argv)
-        ns = env_config.moveit_commander_ns()
-        if ns:
+        mg_kw = env_config.moveit_move_group_commander_kwargs()
+        if mg_kw:
+            # 绝对参数路径 + ns：与 /sgr532/robot_description、/sgr532/move_group 一致
             self._moveit_arm = moveit_commander.MoveGroupCommander(
-                "sagittarius_arm", ns=ns)
+                "sagittarius_arm", **mg_kw)
             self._moveit_gripper = moveit_commander.MoveGroupCommander(
-                "sagittarius_gripper", ns=ns)
+                "sagittarius_gripper", **mg_kw)
         else:
             self._moveit_arm = moveit_commander.MoveGroupCommander("sagittarius_arm")
             self._moveit_gripper = moveit_commander.MoveGroupCommander(
