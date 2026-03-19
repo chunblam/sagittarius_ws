@@ -24,6 +24,8 @@ Action向量不变：
 import os
 import sys
 import time
+from typing import Tuple
+
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -328,7 +330,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         return np.array(crops, dtype=np.float32)  # (N, 3, 28, 28)
 
-    def _robot_to_pixel(self, xy: np.ndarray) -> Tuple:
+    def _robot_to_pixel(self, xy: np.ndarray) -> Tuple[float, float]:
         """机械臂坐标 → 像素坐标（需要标定值）。"""
         from perception.camera_perception import CameraPerception
         # 用默认标定值，真机部署时会被替换
