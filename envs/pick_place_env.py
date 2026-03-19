@@ -69,6 +69,11 @@ PLACE_H       = 0.07
 CROP_SIZE     = 28
 POSITION_NOISE_SIGMA = 0.035
 
+# MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
+MOVEIT_ARM_HOME_STATE = "home"       # 常见另有 up / sleep，勿写成 Home
+MOVEIT_GRIPPER_OPEN_STATE = "open"
+MOVEIT_GRIPPER_CLOSE_STATE = "close"
+
 # Gazebo模型名称约定：{color}_block, {color}_bin
 def block_name(color: str) -> str: return f"{color}_block"
 def bin_name(color: str)   -> str: return f"{color}_bin"
@@ -386,13 +391,13 @@ class SagittariusPickPlaceEnv(gym.Env):
     # ── MoveIt动作原语 ──────────────────────────────────────────────────────
 
     def _open_gripper(self):
-        self._moveit_gripper.set_named_target("open")
+        self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_OPEN_STATE)
         self._moveit_gripper.go(wait=True)
         self._gripper_open = True
         time.sleep(0.3)
 
     def _close_gripper(self):
-        self._moveit_gripper.set_named_target("close")
+        self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_CLOSE_STATE)
         self._moveit_gripper.go(wait=True)
         self._gripper_open = False
         time.sleep(0.3)
@@ -432,7 +437,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _return_home(self):
         try:
-            self._moveit_arm.set_named_target("Home")
+            self._moveit_arm.set_named_target(MOVEIT_ARM_HOME_STATE)
             self._moveit_arm.go(wait=True)
             self._open_gripper()
         except Exception:

@@ -91,6 +91,8 @@ EXPLORELLM_MOVEIT_NS=root
 
 **说明**：`/gazebo/...`、`/usb_cam/...` 等一般为全局话题，无需加 `sgr532` 前缀。
 
+**SRDF named states**：`pick_place_env` 使用与 RViz 一致的 **`home`**（机械臂）、**`open` / `close`**（夹爪）。名称在 `envs/pick_place_env.py` 顶部常量 `MOVEIT_ARM_HOME_STATE` 等；若你包内不同，请改常量以匹配 SRDF。
+
 ### 4. 验证环境
 
 ```bash
