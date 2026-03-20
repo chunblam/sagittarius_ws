@@ -40,6 +40,8 @@ def get_args():
     p.add_argument("--seed",               type=int,   default=0)
     p.add_argument("--task",               type=str,   default="short_horizon")
     p.add_argument("--max-episode-steps",  type=int,   default=10)
+    p.add_argument("--pose-id-count",      type=int,   default=1,
+                   help="动作中的姿态候选数；两阶段建议 1 -> 2~4")
 
     # 颜色配置
     p.add_argument("--yaml-path",          type=str,   default=None)
@@ -122,13 +124,14 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     train_env = Monitor(
         SagittariusPickPlaceEnv(
             task=args.task, max_steps=args.max_episode_steps,
-            color_config=color_cfg),
+            color_config=color_cfg, pose_id_count=args.pose_id_count),
         filename=str(log_dir / "train_monitor.csv"))
 
     eval_env = Monitor(
         SagittariusPickPlaceEnv(
             task=args.task, max_steps=args.max_episode_steps,
-            color_config=color_cfg, noise_sigma=0.0),
+            color_config=color_cfg, noise_sigma=0.0,
+            pose_id_count=args.pose_id_count),
         filename=str(log_dir / "eval_monitor.csv"))
 
     # 网络与动作空间维度 = 每回合激活颜色数 n_active（非 color_cfg.n_colors）

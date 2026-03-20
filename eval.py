@@ -31,6 +31,7 @@ def get_args():
     p.add_argument("--model-path",    type=str, default=None)
     p.add_argument("--n-episodes",    type=int, default=30)
     p.add_argument("--task",          type=str, default="short_horizon")
+    p.add_argument("--pose-id-count", type=int, default=1)
     p.add_argument("--real-robot",    action="store_true")
     p.add_argument("--plot",          action="store_true")
     p.add_argument("--log-dir",       type=str, default="./logs")
@@ -57,7 +58,7 @@ def get_args():
 # ── 仿真评估（不变） ───────────────────────────────────────────────────────────
 
 def eval_sim(model_path: str, n_episodes: int, task: str,
-             colors=None, yaml_path=None):
+             colors=None, yaml_path=None, pose_id_count: int = 1):
     import rospy
     from config.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
@@ -72,7 +73,9 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
         cfg._build_index()
 
     model = ExploRLLMSAC.load(model_path)
-    env   = SagittariusPickPlaceEnv(task=task, max_steps=10, color_config=cfg)
+    env   = SagittariusPickPlaceEnv(
+        task=task, max_steps=10, color_config=cfg, pose_id_count=pose_id_count
+    )
 
     results   = {"episodes": []}
     successes = 0
@@ -99,8 +102,14 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
                 c, t_str = ac[obj_i], "block"
             else:
                 c, t_str = ac[obj_i - na], "bin"
+            if len(action) >= 5:
+                pose_id = int(round(float(action[2])))
+                rx, ry = float(action[3]), float(action[4])
+            else:
+                pose_id = 0
+                rx, ry = float(action[2]), float(action[3])
             print(f"  step {steps}: {['pick','place'][prim]} {c}_{t_str}  "
-                  f"res=({action[2]:.3f},{action[3]:.3f})  "
+                  f"pose_id={pose_id} res=({rx:.3f},{ry:.3f})  "
                   f"r={r:.3f}  ok={step_info.get('success')}")
 
         rewards.append(ep_r)
@@ -337,7 +346,7 @@ def main():
     else:
         results = eval_sim(
             args.model_path, args.n_episodes, args.task,
-            args.colors, args.yaml_path)
+            args.colors, args.yaml_path, args.pose_id_count)
 
     out_file = out / "eval_results.json"
     with open(out_file, "w") as f:

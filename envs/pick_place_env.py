@@ -17,13 +17,14 @@ Observation向量新布局（N = n_active，每回合从 color_cfg 随机抽 ACT
   task_encoding = [pick_local_idx, place_local_idx]，在 _active_colors 中的下标 0..N-1。
 
 Action向量：
-  [primitive(0-1), obj_index(0-2*N-1), res_x, res_y]
+  [primitive(0-1), obj_index(0-2*N-1), pose_id(0..K-1), res_x, res_y]
   前 N 个 = 激活颜色方块，后 N 个 = 激活颜色垃圾桶（顺序与 _active_colors 一致）。
 """
 
 import os
 import sys
 import time
+import math
 from typing import Tuple
 
 import numpy as np
@@ -62,6 +63,7 @@ except ImportError:
 #   - 减少 observation 中无用颜色槽位的噪声
 #   - 训练收敛更快，泛化性不受影响（每次颜色随机不同）
 ACTIVE_COLORS_PER_EPISODE = 3
+DEFAULT_POSE_ID_COUNT = 1
 
 # 与 pick_place_scene.world 中声明的 {color}_block / {color}_bin 一致。
 # 用于 reset 时把「未参与本回合」的物体全部移出桌面：若仅用 color_cfg.colors
@@ -145,7 +147,8 @@ class SagittariusPickPlaceEnv(gym.Env):
                  max_steps: int = 10,
                  noise_sigma: float = POSITION_NOISE_SIGMA,
                  color_config: ColorConfig = None,
-                 yaml_path: str = None):
+                 yaml_path: str = None,
+                 pose_id_count: int = DEFAULT_POSE_ID_COUNT):
 
         super().__init__()
         self.task        = task
@@ -157,6 +160,10 @@ class SagittariusPickPlaceEnv(gym.Env):
         # N_active <= color_cfg.n_colors
         self.n_active = min(ACTIVE_COLORS_PER_EPISODE,
                             self.color_cfg.n_colors)
+        self.pose_id_count = max(1, int(pose_id_count))
+        self.pose_yaw_candidates = np.linspace(
+            -math.pi / 2.0, math.pi / 2.0, self.pose_id_count
+        ).astype(np.float32)
         # 当前 episode 激活的颜色子集（每次 reset 重新抽取）
         self._active_colors: list = self.color_cfg.colors[:self.n_active]
 
@@ -194,12 +201,15 @@ class SagittariusPickPlaceEnv(gym.Env):
         )
 
         # ── 动作空间 ──────────────────────────────────────────────────────
-        # [primitive(0-1), obj_index(0 to 2N-1), res_x, res_y]
+        # [primitive(0-1), obj_index(0 to 2N-1), pose_id(0..K-1), res_x, res_y]
         # obj_index 0..N-1 = 方块（本回合 _active_colors 顺序）
         # obj_index N..2N-1 = 桶索引（同上）
         self.action_space = spaces.Box(
-            low=np.array( [0.0, 0.0, -0.05, -0.05], dtype=np.float32),
-            high=np.array([1.0, float(2*N-1), 0.05, 0.05], dtype=np.float32)
+            low=np.array( [0.0, 0.0, 0.0, -0.05, -0.05], dtype=np.float32),
+            high=np.array(
+                [1.0, float(2*N-1), float(self.pose_id_count - 1), 0.05, 0.05],
+                dtype=np.float32,
+            )
         )
 
         # ── 内部状态 ──────────────────────────────────────────────────────
@@ -450,13 +460,11 @@ class SagittariusPickPlaceEnv(gym.Env):
                     self._teleport(nm, SPAWN_PARK_X, SPAWN_PARK_Y0 + park_i * 0.2, zc)
                     park_i += 1
 
-        # ── 仅为激活颜色补齐模型 ──────────────────────────────────────────
+        # ── 仅为激活颜色补齐模型（不再依赖 model_states 判定，避免竞态） ──
         spawn_k = 0
         for c in self._active_colors:
             for nm, zc in ((block_name(c), BLOCK_H / 2.0),
                            (bin_name(c), BIN_H / 2.0)):
-                if self._model_in_world(nm):
-                    continue
                 xml = model_xml_for_spawn(nm)
                 if xml is None:
                     rospy.logerr(f"[Env] 无法为 {nm} 生成 spawn XML，请检查 world 文件")
@@ -475,6 +483,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                 else:
                     self._teleport(nm, pose.position.x, pose.position.y, zc)
                     spawn_k += 1
+        rospy.sleep(0.1)
 
     def _deterministic_grid(self, n: int, zone_x: tuple,
                             zone_y: tuple, gap: float) -> list:
@@ -659,7 +668,11 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._gripper_open = False
         time.sleep(0.3)
 
-    def _move_to_xy(self, x: float, y: float, z: float) -> bool:
+    def _pose_for_yaw(self, yaw: float) -> tuple:
+        half = float(yaw) * 0.5
+        return (0.0, 0.0, math.sin(half), math.cos(half))
+
+    def _move_to_xy(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
         """
         规划并执行到目标位姿（末端笛卡尔）。
 
@@ -678,7 +691,11 @@ class SagittariusPickPlaceEnv(gym.Env):
         target.pose.position.x = x
         target.pose.position.y = y
         target.pose.position.z = z
-        target.pose.orientation.w = 1.0
+        qx, qy, qz, qw = self._pose_for_yaw(yaw)
+        target.pose.orientation.x = qx
+        target.pose.orientation.y = qy
+        target.pose.orientation.z = qz
+        target.pose.orientation.w = qw
         # 规划前同步一次场景，避免使用过期障碍位姿
         self._sync_moveit_planning_scene()
         self._moveit_arm.set_start_state_to_current_state()
@@ -720,7 +737,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         except Exception as e:
             rospy.logwarn(f"[Env] detach_box 失败 {color}: {e}")
 
-    def _execute_pick(self, x: float, y: float, color: str) -> bool:
+    def _execute_pick(self, x: float, y: float, color: str, pose_id: int) -> bool:
         """
         完整 pick 原语：开爪 → 接近 → 下降 → 关爪 → 物理验证 → 抬起。
 
@@ -733,17 +750,18 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 抬起验证阈值：必须高于桶口，再额外留 2cm 裕量
         LIFT_VERIFY_Z = TABLE_Z + BIN_H + 0.02
 
+        yaw = float(self.pose_yaw_candidates[int(np.clip(pose_id, 0, self.pose_id_count - 1))])
         self._open_gripper()
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw):
             return False
         # 先降到方块顶面上方，再垂直落爪，减少从高空直线插向桌面时横扫方块/刮桌沿
         pre_z = TABLE_Z + BLOCK_H + PRE_GRASP_CLEAR_Z
-        if not self._move_to_xy(x, y, pre_z):
+        if not self._move_to_xy(x, y, pre_z, yaw):
             return False
-        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):
+        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H, yaw):
             return False
         self._close_gripper()
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw):
             self._open_gripper()
             self._holding_color = None
             return False
@@ -762,15 +780,16 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._attach_held_block_to_scene(color)
         return True
 
-    def _execute_place(self, x: float, y: float) -> bool:
+    def _execute_place(self, x: float, y: float, pose_id: int) -> bool:
         held = self._holding_color
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
-        if not self._move_to_xy(x, y, TABLE_Z + PLACE_H):    return False
+        yaw = float(self.pose_yaw_candidates[int(np.clip(pose_id, 0, self.pose_id_count - 1))])
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw): return False
+        if not self._move_to_xy(x, y, TABLE_Z + PLACE_H, yaw):    return False
         self._open_gripper()
         if held:
             self._detach_held_block_from_scene(held)
         self._holding_color = None
-        self._move_to_xy(x, y, TABLE_Z + APPROACH_H)
+        self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw)
         return True
 
     def _return_home(self):
@@ -903,7 +922,13 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 解码动作
         primitive = int(np.round(np.clip(action[0], 0, 1)))
         obj_idx   = int(np.round(np.clip(action[1], 0, 2*self.N - 1)))
-        res_xy    = np.clip(action[2:4], -0.05, 0.05)
+        if len(action) >= 5:
+            pose_id = int(np.round(np.clip(action[2], 0, self.pose_id_count - 1)))
+            res_xy  = np.clip(action[3:5], -0.05, 0.05)
+        else:
+            # 兼容旧模型的4维动作：默认 pose_id=0
+            pose_id = 0
+            res_xy  = np.clip(action[2:4], -0.05, 0.05)
 
         # obj_idx 0..N-1 = 方块，N..2N-1 = 桶（N = n_active）
         # 颜色映射基于本 episode 的 _active_colors（而非全部颜色）
@@ -932,10 +957,10 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 执行动作原语
         if primitive == 0:
             success = self._execute_pick(
-                target_xy[0], target_xy[1], color)
+                target_xy[0], target_xy[1], color, pose_id)
         else:
             success = self._execute_place(
-                target_xy[0], target_xy[1])
+                target_xy[0], target_xy[1], pose_id)
 
         reward     = self._compute_reward(primitive, color, target_xy, success)
         terminated = self._check_done()
@@ -946,6 +971,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             "primitive":     primitive,
             "color":         color,
             "obj_idx":       obj_idx,
+            "pose_id":       pose_id,
             "target_xy":     target_xy.tolist(),
             "success":       success,
             "step":          self._step_count,

@@ -172,7 +172,7 @@ def test_5_env_reset_step():
         env = SagittariusPickPlaceEnv(task="short_horizon", max_steps=3)
         na  = env.n_active
         ok("环境创建成功")
-        ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=4")
+        ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=5")
 
         t0 = time.time()
         obs, info_dict = env.reset()
@@ -222,7 +222,7 @@ def test_5_env_reset_step():
         info("\n调用 env.step()（pick 正确颜色方块，约 10-20 秒）...")
         pick_idx = active.index(info_dict.get("pick_color"))
         action_correct = np.array(
-            [0.0, float(pick_idx), 0.0, 0.0], dtype=np.float32)
+            [0.0, float(pick_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
         obs2, r_correct, done, trunc, info2 = env.step(action_correct)
         ok(f"step() 正确颜色  reward={r_correct:.4f}  "
@@ -232,7 +232,7 @@ def test_5_env_reset_step():
         info("调用 env.step()（pick 错误颜色方块，约 10-20 秒）...")
         wrong_idx = (pick_idx + 1) % na   # 选一个不同的激活颜色
         action_wrong = np.array(
-            [0.0, float(wrong_idx), 0.0, 0.0], dtype=np.float32)
+            [0.0, float(wrong_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
         obs3, r_wrong, done2, trunc2, info3 = env.step(action_wrong)
         ok(f"step() 错误颜色  reward={r_wrong:.4f}  "

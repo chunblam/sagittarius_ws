@@ -68,7 +68,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -83,7 +83,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -98,7 +98,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -113,7 +113,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -128,7 +128,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -143,7 +143,7 @@
       </visual>
       <collision name="c">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction></surface>
+        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
@@ -155,69 +155,34 @@
        底厚：0.25cm
        pose z=0.06 = TABLE_Z(0.0) + BIN_H/2(0.06)
 
-       每个桶由 5 个 link 拼合：
-        bottom : 底板  7cm×7cm×0.25cm
-        wall_f : 前壁  7cm×0.25cm×11.75cm（贴桶内侧）
-         wall_b : 后壁
-         wall_l : 左壁
-         wall_r : 右壁
-
-       注意：SDF 里同一 model 的 link pose 相对于 model 原点
-             model 原点 = 桶的几何中心（x=0,y=0,z=桶高中心）
+      每个桶是单 link 整体刚体（5个子碰撞体拼接成空心桶）：
+       bottom + wall_f + wall_b + wall_l + wall_r
+      各子 visual/collision 的 pose 相对于该单 link 原点；
+      model 原点 = 桶的几何中心（x=0,y=0,z=桶高中心）
 
        桶壁外表面颜色鲜艳，方便 VLM 识别。
        内壁设为同色但深色，增加内外对比。
   ════════════════════════════════════════════════════ -->
-
   <!-- ─────────── RED BIN ─────────── -->
   <model name="red_bin">
     <static>false</static>
-    <!-- spawn位置，训练时会被随机传送 -->
     <pose>0.35 -0.15 0.06 0 0 0</pose>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
 
-    <!-- 底板 z_local = -0.06+0.00125 = -0.05875 -->
-    <link name="bottom">
-      <pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-
-    <!-- 前壁 (x+方向) -->
-    <link name="wall_f">
-      <pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-
-    <!-- 后壁 (x-方向) -->
-    <link name="wall_b">
-      <pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-
-    <!-- 左壁 (y+方向) -->
-    <link name="wall_l">
-      <pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-
-    <!-- 右壁 (y-方向) -->
-    <link name="wall_r">
-      <pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
@@ -225,35 +190,22 @@
   <model name="green_bin">
     <static>false</static>
     <pose>0.35 0.00 0.06 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
+
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
@@ -261,35 +213,22 @@
   <model name="blue_bin">
     <static>false</static>
     <pose>0.35 0.15 0.06 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
+
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
@@ -297,35 +236,22 @@
   <model name="yellow_bin">
     <static>false</static>
     <pose>0.38 -0.08 0.06 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
+
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
@@ -333,35 +259,22 @@
   <model name="pink_bin">
     <static>false</static>
     <pose>0.38 0.08 0.06 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
+
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
@@ -369,37 +282,25 @@
   <model name="orange_bin">
     <static>false</static>
     <pose>0.36 -0.14 0.06 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
-        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
-    </link>
-    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
-        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
-    </link>
-    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
-        <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
-      </visual>
-      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+    <link name="link">
+      <inertial>
+        <mass>0.16</mass>
+        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+      </inertial>
+      <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
+      <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
+      <visual name="wall_b_v"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
+      <visual name="wall_l_v"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
+      <visual name="wall_r_v"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
+
+      <collision name="bottom_c"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
+      <collision name="wall_f_c"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_b_c"><pose>-0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
+      <collision name="wall_l_c"><pose>0 0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
+      <collision name="wall_r_c"><pose>0 -0.03375 0 0 0 0</pose><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
+
 
 </world>
 </sdf>

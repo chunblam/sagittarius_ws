@@ -438,7 +438,7 @@ class LLMExplorationPolicy:
 
         res_xy = self.call_low_level(obj_name, hwc)
 
-        return np.array([float(primitive), float(obj_idx),
+        return np.array([float(primitive), float(obj_idx), 0.0,
                          float(res_xy[0]), float(res_xy[1])],
                         dtype=np.float32)
 
