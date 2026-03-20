@@ -246,7 +246,19 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.allow_replanning(True)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
-        self._planning_scene = PlanningSceneInterface()
+        # PlanningScene 也必须走与 MoveGroup 相同的命名空间。
+        # 否则会等待根命名空间的 /get_planning_scene，出现一直 waiting。
+        ps_ns = mg_kw.get("ns", "") if mg_kw else ""
+        try:
+            self._planning_scene = PlanningSceneInterface(
+                ns=f"/{ps_ns}" if ps_ns else "",
+                synchronous=True,
+            )
+        except TypeError:
+            # 兼容旧版 moveit_commander（无 synchronous 参数）
+            self._planning_scene = PlanningSceneInterface(
+                ns=f"/{ps_ns}" if ps_ns else ""
+            )
         rospy.sleep(1.0)
 
         rospy.Subscriber("/gazebo/model_states", ModelStates,
