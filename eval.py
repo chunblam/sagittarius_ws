@@ -171,7 +171,7 @@ def eval_real_robot(args, n_episodes: int, task: str,
 
     print(f"\n[RealEval] 摆放说明：")
     print(f"  - 方块：桌面左侧区域（约 x=0.15~0.32 m）")
-    print(f"  - 垃圾桶：桌面右侧区域（约 x=0.30~0.50 m，与 env BIN_ZONE 一致）")
+    print(f"  - 方块与桶：与训练一致，均在桌面统一随机区内（见 env OBJECT_ZONE_*）")
     print(f"  - VLM 会识别任意颜色，无需提前标定 HSV 阈值")
     print(f"  - 摄像头分辨率建议 ≥ 640×480，均匀照明")
     input("\n  摆好物品后按 Enter 开始...\n")

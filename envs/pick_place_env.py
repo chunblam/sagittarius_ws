@@ -36,14 +36,20 @@ sys.path.insert(0, ROOT)
 import env_config  # noqa: F401 — MoveIt 命名空间 EXPLORELLM_MOVEIT_NS
 import rospy
 from gazebo_msgs.msg import ModelStates
-from gazebo_msgs.srv import SetModelState
+from gazebo_msgs.srv import SetModelState, DeleteModel, SpawnModel
 from gazebo_msgs.msg import ModelState
+from geometry_msgs.msg import Pose
 from std_srvs.srv import Empty
 
 import moveit_commander
 from geometry_msgs.msg import PoseStamped
 
 from config.color_config import ColorConfig, get_color_config
+
+try:
+    from envs.gazebo_model_io import model_xml_for_spawn
+except ImportError:
+    from gazebo_model_io import model_xml_for_spawn
 
 
 # ── 场景参数 ──────────────────────────────────────────────────────────────────
@@ -56,19 +62,21 @@ from config.color_config import ColorConfig, get_color_config
 #   - 训练收敛更快，泛化性不受影响（每次颜色随机不同）
 ACTIVE_COLORS_PER_EPISODE = 3
 
-# 方块随机化区域（桌面左半部分）
-# x: 0.15~0.32（17cm），y: ±0.22（44cm）
-# 3 个方块（5cm，间距 0.09m）完全放得下
-BLOCK_ZONE_X = (0.15, 0.32)
-BLOCK_ZONE_Y = (-0.22, 0.22)
-BLOCK_MIN_GAP = 0.09   # 5cm方块 + 4cm间隙，互不碰撞
+# 与 pick_place_scene.world 中声明的 {color}_block / {color}_bin 一致。
+# 用于 reset 时把「未参与本回合」的物体全部移出桌面：若仅用 color_cfg.colors
+# 切片求 inactive，当 yaml 只配置了 3 种颜色时 inactive 为空，world 里其余 3+3
+# 个模型会永远留在桌上。
+WORLD_SPAWN_COLORS = ("red", "green", "blue", "yellow", "pink", "orange")
 
-# 垃圾桶随机化区域（桌面右半部分）
-# x: 0.30~0.50（20cm，2列），y: ±0.24（48cm，3行）
-# 最多 2×3=6 个桶，间距 0.16m 时 3 个桶绰绰有余
-BIN_ZONE_X   = (0.30, 0.50)
-BIN_ZONE_Y   = (-0.24, 0.24)
-BIN_MIN_GAP  = 0.16   # 7cm桶对角线0.099m，0.16m确保边缘间距≥6cm
+# 激活物体（3 方块 + 3 桶）统一随机区域：70cm 桌面略收边，与机械臂工作区大致一致
+# 不再区分「左方块 / 右桶」；任意两物体中心距 ≥ MIN_OBJECT_CENTER_GAP
+OBJECT_ZONE_X = (0.12, 0.56)
+OBJECT_ZONE_Y = (-0.28, 0.28)
+MIN_OBJECT_CENTER_GAP = 0.12
+
+# 首次 spawn 临时落点（远离桌面，避免与桌台重叠）
+SPAWN_PARK_X = 2.0
+SPAWN_PARK_Y0 = 0.0
 
 # 高度参数（z轴，单位米）
 # ──────────────────────────────────────────────────────────
@@ -97,7 +105,12 @@ BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
 APPROACH_H    = 0.18   # 接近高度（末端 z = 0.18m）
-GRASP_H       = 0.025  # 抓取高度（末端 z = 0.025m ≈ 方块中部）
+# 抓取高度：世界系 z。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
+# 过低的单一目标易在下降过程中挤压方块/刮桌面。采用略高于几何中心 + 分步下降。
+GRASP_H       = 0.030  # 最终抓取末端 z（TABLE_Z + 该值），略高于原 0.025
+# 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
+PRE_GRASP_CLEAR_Z = 0.02  # 在方块顶面上方预留的间隙（米），再落爪
+
 PLACE_H       = 0.11   # 放置高度（末端 z = 0.11m，接近桶口内部）
 
 # 图像crop参数
@@ -195,6 +208,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._model_states    = None
         self._latest_image    = None
         self._bridge          = None
+        self._delete_model_srv = None
+        self._spawn_model_srv  = None
 
         # 当前episode中物体位置缓存（含噪声）
         self._block_positions: dict = {}   # color → np.array([x,y])
@@ -247,6 +262,21 @@ class SagittariusPickPlaceEnv(gym.Env):
             "/gazebo/set_model_state", SetModelState)
 
         try:
+            rospy.wait_for_service("/gazebo/delete_model", timeout=5.0)
+            self._delete_model_srv = rospy.ServiceProxy(
+                "/gazebo/delete_model", DeleteModel)
+        except Exception as e:
+            rospy.logwarn(
+                f"[Env] /gazebo/delete_model 不可用，未激活物体将用远端停放代替删除: {e}")
+        try:
+            rospy.wait_for_service("/gazebo/spawn_sdf_model", timeout=5.0)
+            self._spawn_model_srv = rospy.ServiceProxy(
+                "/gazebo/spawn_sdf_model", SpawnModel)
+        except Exception as e:
+            rospy.logwarn(
+                f"[Env] /gazebo/spawn_sdf_model 不可用，重新激活时将无法从 world 模板 spawn: {e}")
+
+        try:
             rospy.wait_for_service("/gazebo/unpause_physics", timeout=5)
             rospy.ServiceProxy("/gazebo/unpause_physics", Empty)()
         except Exception:
@@ -279,7 +309,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         except ValueError:
             return np.zeros(3, dtype=np.float32)
 
-    def _teleport(self, name: str, x: float, y: float, z: float):
+    def _teleport(self, name: str, x: float, y: float, z: float) -> bool:
         state = ModelState()
         state.model_name = name
         state.pose.position.x = x
@@ -288,119 +318,175 @@ class SagittariusPickPlaceEnv(gym.Env):
         state.pose.orientation.w = 1.0
         state.reference_frame = "world"
         try:
-            self._set_model_state(state)
+            resp = self._set_model_state(state)
+            if resp is not None and hasattr(resp, "success") and not resp.success:
+                msg = getattr(resp, "status_message", "")
+                rospy.logwarn(f"[Env] SetModelState 拒绝 {name}: {msg}")
+                return False
+            return True
         except Exception as e:
             rospy.logwarn(f"[Env] Teleport {name} 失败: {e}")
+            return False
+
+    def _model_in_world(self, model_name: str) -> bool:
+        if self._model_states is None:
+            return False
+        try:
+            return model_name in self._model_states.name
+        except Exception:
+            return False
+
+    def _delete_model_safe(self, model_name: str) -> bool:
+        if self._delete_model_srv is None:
+            return False
+        try:
+            self._delete_model_srv(model_name)
+            return True
+        except Exception as e:
+            rospy.logwarn(f"[Env] delete_model {model_name}: {e}")
+            return False
+
+    def _spawn_model_safe(self, model_name: str, model_xml: str,
+                          pose: Pose) -> bool:
+        if self._spawn_model_srv is None:
+            return False
+        try:
+            self._spawn_model_srv(
+                model_name=model_name,
+                model_xml=model_xml,
+                robot_namespace="",
+                initial_pose=pose,
+                reference_frame="world",
+            )
+            return True
+        except Exception as e:
+            rospy.logwarn(f"[Env] spawn_sdf_model {model_name}: {e}")
+            return False
+
+    def _sync_gazebo_models_delete_or_spawn(self) -> None:
+        """
+        未激活颜色：从仿真中删除模型（减少实体与碰撞）。
+        激活但缺失（上轮被删）：从 pick_place_scene.world 提取 SDF 并 spawn。
+        若 Gazebo 服务不可用，回退为远端 _teleport 停放（与旧版兼容）。
+        """
+        active_set = set(self._active_colors)
+        park_x = 2.0
+        park_i = 0
+
+        # ── 删除未激活 ────────────────────────────────────────────────────
+        for c in WORLD_SPAWN_COLORS:
+            if c in active_set:
+                continue
+            for nm, zc in ((block_name(c), BLOCK_H / 2.0),
+                           (bin_name(c), BIN_H / 2.0)):
+                if not self._model_in_world(nm):
+                    continue
+                if self._delete_model_srv is not None:
+                    self._delete_model_safe(nm)
+                else:
+                    py = park_i * 0.2
+                    self._teleport(nm, park_x, py, zc)
+                    park_i += 1
+
+        # ── 为激活颜色补齐模型 ───────────────────────────────────────────
+        spawn_k = 0
+        for c in self._active_colors:
+            for nm, zc in ((block_name(c), BLOCK_H / 2.0),
+                           (bin_name(c), BIN_H / 2.0)):
+                if self._model_in_world(nm):
+                    continue
+                xml = model_xml_for_spawn(nm)
+                if xml is None:
+                    rospy.logerr(f"[Env] 无法为 {nm} 生成 spawn XML，请检查 world 文件")
+                    continue
+                pose = Pose()
+                pose.position.x = SPAWN_PARK_X + spawn_k * 0.06
+                pose.position.y = SPAWN_PARK_Y0 + spawn_k * 0.14
+                pose.position.z = zc
+                pose.orientation.w = 1.0
+                if self._spawn_model_srv is not None:
+                    if self._spawn_model_safe(nm, xml, pose):
+                        spawn_k += 1
+                    else:
+                        self._teleport(nm, pose.position.x, pose.position.y, zc)
+                        spawn_k += 1
+                else:
+                    self._teleport(nm, pose.position.x, pose.position.y, zc)
+                    spawn_k += 1
+
+    def _deterministic_grid(self, n: int, zone_x: tuple,
+                            zone_y: tuple, gap: float) -> list:
+        cols = max(1, int((zone_x[1] - zone_x[0]) / gap))
+        rows = max(1, int((zone_y[1] - zone_y[0]) / gap))
+        pts  = []
+        for row in range(rows):
+            for col in range(cols):
+                cx = zone_x[0] + gap * (col + 0.5)
+                cy = zone_y[0] + gap * (row + 0.5)
+                if cx <= zone_x[1] and cy <= zone_y[1]:
+                    pts.append((cx, cy))
+                if len(pts) >= n:
+                    return pts
+        return pts[:n]
+
+    def _place_active_objects_unified(self, rng: np.random.Generator) -> None:
+        """在 OBJECT_ZONE 内为 3 方块 + 3 桶采样位置，两两中心距 ≥ MIN_OBJECT_CENTER_GAP。"""
+        targets = []
+        for c in self._active_colors:
+            targets.append((block_name(c), BLOCK_H / 2.0))
+            targets.append((bin_name(c), BIN_H / 2.0))
+
+        placed_xy = []
+        for idx, (nm, zc) in enumerate(targets):
+            ok = False
+            for _ in range(280):
+                x = float(rng.uniform(*OBJECT_ZONE_X))
+                y = float(rng.uniform(*OBJECT_ZONE_Y))
+                if all(
+                    np.hypot(x - px, y - py) >= MIN_OBJECT_CENTER_GAP
+                    for px, py in placed_xy
+                ):
+                    placed_xy.append((x, y))
+                    self._teleport(nm, x, y, zc)
+                    ok = True
+                    break
+            if ok:
+                continue
+            grid = self._deterministic_grid(
+                len(targets), OBJECT_ZONE_X, OBJECT_ZONE_Y,
+                MIN_OBJECT_CENTER_GAP,
+            )
+            if idx < len(grid):
+                x, y = grid[idx]
+                placed_xy.append((x, y))
+                self._teleport(nm, x, y, zc)
+                rospy.logwarn(
+                    f"[Env] {nm} 随机摆放失败，使用 fallback 网格 ({x:.3f},{y:.3f})")
+            else:
+                rospy.logerr(
+                    "[Env] 物体无法摆放：请扩大 OBJECT_ZONE_* 或减小 "
+                    "MIN_OBJECT_CENTER_GAP / n_active")
 
     def _randomize_scene(self):
         """
         随机化场景：
-          1. 从全部颜色中随机抽取 n_active 种颜色作为本 episode 的激活颜色
-          2. 把激活颜色的方块随机摆在左半区，桶随机摆在右半区
-          3. 非激活颜色的物体传送到桌面外的停靠区，不干扰仿真
-          4. 保证同区域内物体互不重叠，100次失败后使用确定性网格 fallback
-
-        网格 fallback 算法（修正版）：
-          之前的 linspace 方案在 x 方向宽度不足时生成的网格间距不满足要求。
-          新方案：先算出每行能放多少个（floor(zone_x_width / gap)），
-          再按行优先枚举（x 先排满一行再换 y），保证每个点都满足间距。
+          1. 抽取本 episode 激活颜色与任务；
+          2. 未激活模型从 Gazebo 删除；缺失的激活模型按 world 模板 spawn；
+          3. 激活的 3 方块 + 3 桶在统一桌面区域内随机摆放，两两间距约束。
         """
         rng = np.random.default_rng()
 
-        # ── Step 1: 抽取本 episode 的激活颜色 ─────────────────────────────
         all_colors = list(self.color_cfg.colors)
         rng.shuffle(all_colors)
         self._active_colors = all_colors[: self.n_active]
-        inactive_colors     = all_colors[self.n_active :]
 
-        # 更新任务颜色（确保在激活颜色里）
         self.pick_color  = self._active_colors[0]
         remaining        = [c for c in self._active_colors
                             if c != self.pick_color]
         self.place_color = rng.choice(remaining) if remaining else self._active_colors[0]
 
-        # ── Step 2: 把非激活颜色的物体挪走（停靠区，不干扰桌面） ──────────
-        PARK_X, PARK_Y_START = 2.0, 0.0   # 远离桌面
-        for i, color in enumerate(inactive_colors):
-            park_y = PARK_Y_START + i * 0.2
-            self._teleport(block_name(color), PARK_X, park_y, 0.02)
-            self._teleport(bin_name(color),   PARK_X + 0.5, park_y, 0.05)
-
-        # ── Step 3: 正确的网格生成（保证间距 ≥ gap） ─────────────────────
-        def _deterministic_grid(n: int, zone_x: tuple,
-                                zone_y: tuple, gap: float) -> list:
-            """
-            生成最多 n 个位置的均匀网格，保证任意两点间距 ≥ gap。
-            按行优先枚举：先沿 x 方向排满一行，再移到下一行。
-            """
-            cols = max(1, int((zone_x[1] - zone_x[0]) / gap))
-            rows = max(1, int((zone_y[1] - zone_y[0]) / gap))
-            pts  = []
-            for row in range(rows):
-                for col in range(cols):
-                    cx = zone_x[0] + gap * (col + 0.5)
-                    cy = zone_y[0] + gap * (row + 0.5)
-                    if cx <= zone_x[1] and cy <= zone_y[1]:
-                        pts.append((cx, cy))
-                    if len(pts) >= n:
-                        return pts
-            return pts[:n]
-
-        # ── Step 4: 随机化方块 ────────────────────────────────────────────
-        placed_blocks = []
-        for idx, color in enumerate(self._active_colors):
-            name   = block_name(color)
-            placed = False
-            for _ in range(150):
-                x = rng.uniform(*BLOCK_ZONE_X)
-                y = rng.uniform(*BLOCK_ZONE_Y)
-                if all(np.linalg.norm([x - px, y - py]) > BLOCK_MIN_GAP
-                       for px, py in placed_blocks):
-                    placed_blocks.append((x, y))
-                    self._teleport(name, x, y, BLOCK_H / 2)
-                    placed = True
-                    break
-
-            if not placed:
-                grid = _deterministic_grid(
-                    self.n_active, BLOCK_ZONE_X, BLOCK_ZONE_Y, BLOCK_MIN_GAP)
-                if idx < len(grid):
-                    x, y = grid[idx]
-                    placed_blocks.append((x, y))
-                    self._teleport(name, x, y, BLOCK_H / 2)
-                    rospy.logwarn(
-                        f"[Env] 方块 {color} 随机摆放失败，"
-                        f"fallback 网格 ({x:.3f}, {y:.3f})")
-
-        # ── Step 5: 随机化垃圾桶 ──────────────────────────────────────────
-        placed_bins = []
-        for idx, color in enumerate(self._active_colors):
-            name   = bin_name(color)
-            placed = False
-            for _ in range(150):
-                x = rng.uniform(*BIN_ZONE_X)
-                y = rng.uniform(*BIN_ZONE_Y)
-                if all(np.linalg.norm([x - px, y - py]) > BIN_MIN_GAP
-                       for px, py in placed_bins):
-                    placed_bins.append((x, y))
-                    self._teleport(name, x, y, BIN_H / 2)
-                    placed = True
-                    break
-
-            if not placed:
-                grid = _deterministic_grid(
-                    self.n_active, BIN_ZONE_X, BIN_ZONE_Y, BIN_MIN_GAP)
-                if idx < len(grid):
-                    x, y = grid[idx]
-                    placed_bins.append((x, y))
-                    self._teleport(name, x, y, BIN_H / 2)
-                    rospy.logwarn(
-                        f"[Env] 垃圾桶 {color} 随机摆放失败，"
-                        f"fallback 网格 ({x:.3f}, {y:.3f})")
-                else:
-                    rospy.logerr(
-                        f"[Env] 垃圾桶 {color} 无法摆放！"
-                        f"请扩大 BIN_ZONE 或减少 n_active。")
+        self._sync_gazebo_models_delete_or_spawn()
+        self._place_active_objects_unified(rng)
 
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
@@ -511,7 +597,14 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _move_to_xy(self, x: float, y: float, z: float) -> bool:
         """
-        规划并执行到目标位姿。
+        规划并执行到目标位姿（末端笛卡尔）。
+
+        避障说明：此处仅调用 MoveIt MoveGroup.plan()/execute()，在 MoveIt
+        规划场景（URDF/SRDF 碰撞几何、规划组）内做无碰撞轨迹搜索；**未**
+        单独调用 sagittarius_ws 里的「额外避障包」。若未配置 Octomap /
+        动态障碍更新，则主要避开机器人自身与环境静态模型；路径质量取决于
+        OMPL 规划器与容差设置。
+
         plan 失败直接返回 False。
         execute 失败（异常或返回 False）也返回 False，
         避免将"规划成功但执行失败"误报为 success=True 污染奖励信号。
@@ -551,8 +644,14 @@ class SagittariusPickPlaceEnv(gym.Env):
         LIFT_VERIFY_Z = TABLE_Z + BIN_H + 0.02
 
         self._open_gripper()
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
-        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):    return False
+        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
+            return False
+        # 先降到方块顶面上方，再垂直落爪，减少从高空直线插向桌面时横扫方块/刮桌沿
+        pre_z = TABLE_Z + BLOCK_H + PRE_GRASP_CLEAR_Z
+        if not self._move_to_xy(x, y, pre_z):
+            return False
+        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):
+            return False
         self._close_gripper()
         if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
             self._open_gripper()
@@ -723,10 +822,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         target_xy = np.clip(
             base_xy + res_xy,
-            [min(BLOCK_ZONE_X[0], BIN_ZONE_X[0]),
-             min(BLOCK_ZONE_Y[0], BIN_ZONE_Y[0])],
-            [max(BLOCK_ZONE_X[1], BIN_ZONE_X[1]),
-             max(BLOCK_ZONE_Y[1], BIN_ZONE_Y[1])],
+            [OBJECT_ZONE_X[0], OBJECT_ZONE_Y[0]],
+            [OBJECT_ZONE_X[1], OBJECT_ZONE_Y[1]],
         )
 
         # 执行动作原语
