@@ -249,11 +249,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             self._moveit_gripper = moveit_commander.MoveGroupCommander(
                 "sagittarius_gripper")
 
-        self._moveit_arm.set_goal_position_tolerance(0.005)
-        self._moveit_arm.set_goal_orientation_tolerance(0.02)
+        self._moveit_arm.set_goal_position_tolerance(0.008)
+        self._moveit_arm.set_goal_orientation_tolerance(0.08)
         self._moveit_arm.set_max_velocity_scaling_factor(0.4)
         self._moveit_arm.set_max_acceleration_scaling_factor(0.4)
         self._moveit_arm.allow_replanning(True)
+        self._moveit_arm.set_planning_time(5.0)
+        self._moveit_arm.set_num_planning_attempts(8)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。
@@ -312,7 +314,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         rospy.loginfo("[Env] ROS初始化完成。支持颜色: %s",
                       self.color_cfg.colors)
 
-    def _sync_moveit_planning_scene(self):
+    def _sync_moveit_planning_scene(self, ignore_block_color: str = None):
         """
         将当前激活物体同步到 MoveIt PlanningScene：
         - 清理上轮对象（6色方块+桶）
@@ -342,14 +344,16 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         # 激活方块 / 桶
         for c in self._active_colors:
-            bxyz = self._get_pose(block_name(c))
-            p = PoseStamped()
-            p.header.frame_id = "world"
-            p.pose.position.x = float(bxyz[0])
-            p.pose.position.y = float(bxyz[1])
-            p.pose.position.z = float(bxyz[2])
-            p.pose.orientation.w = 1.0
-            self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.04))
+            # 抓取目标方块在抓取阶段不应作为世界障碍物，否则末端无法下探抓取。
+            if ignore_block_color is None or c != ignore_block_color:
+                bxyz = self._get_pose(block_name(c))
+                p = PoseStamped()
+                p.header.frame_id = "world"
+                p.pose.position.x = float(bxyz[0])
+                p.pose.position.y = float(bxyz[1])
+                p.pose.position.z = float(bxyz[2])
+                p.pose.orientation.w = 1.0
+                self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.04))
 
             zyz = self._get_pose(bin_name(c))
             q = PoseStamped()
@@ -672,7 +676,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         half = float(yaw) * 0.5
         return (0.0, 0.0, math.sin(half), math.cos(half))
 
-    def _move_to_xy(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
+    def _move_to_xy(self, x: float, y: float, z: float, yaw: float = 0.0,
+                    ignore_block_color: str = None) -> bool:
         """
         规划并执行到目标位姿（末端笛卡尔）。
 
@@ -697,20 +702,28 @@ class SagittariusPickPlaceEnv(gym.Env):
         target.pose.orientation.z = qz
         target.pose.orientation.w = qw
         # 规划前同步一次场景，避免使用过期障碍位姿
-        self._sync_moveit_planning_scene()
+        self._sync_moveit_planning_scene(ignore_block_color=ignore_block_color)
         self._moveit_arm.set_start_state_to_current_state()
         self._moveit_arm.set_pose_target(
             target, self._moveit_arm.get_end_effector_link())
         plan_ok, traj, _, _ = self._moveit_arm.plan()
         if not plan_ok:
+            self._moveit_arm.clear_pose_targets()
             return False
         try:
             exec_result = self._moveit_arm.execute(traj, wait=True)
+            self._moveit_arm.stop()
+            self._moveit_arm.clear_pose_targets()
             time.sleep(0.2)
             # 旧版 MoveIt Python API execute() 可能返回 None（视为成功）
             return exec_result if isinstance(exec_result, bool) else True
         except Exception as e:
             rospy.logwarn(f"[Env] execute 失败: {e}")
+            try:
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+            except Exception:
+                pass
             return False
 
     def _attach_held_block_to_scene(self, color: str):
@@ -752,16 +765,24 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         yaw = float(self.pose_yaw_candidates[int(np.clip(pose_id, 0, self.pose_id_count - 1))])
         self._open_gripper()
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw):
+        if not self._move_to_xy(
+            x, y, TABLE_Z + APPROACH_H, yaw, ignore_block_color=color
+        ):
             return False
         # 先降到方块顶面上方，再垂直落爪，减少从高空直线插向桌面时横扫方块/刮桌沿
         pre_z = TABLE_Z + BLOCK_H + PRE_GRASP_CLEAR_Z
-        if not self._move_to_xy(x, y, pre_z, yaw):
+        if not self._move_to_xy(
+            x, y, pre_z, yaw, ignore_block_color=color
+        ):
             return False
-        if not self._move_to_xy(x, y, TABLE_Z + GRASP_H, yaw):
+        if not self._move_to_xy(
+            x, y, TABLE_Z + GRASP_H, yaw, ignore_block_color=color
+        ):
             return False
         self._close_gripper()
-        if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw):
+        if not self._move_to_xy(
+            x, y, TABLE_Z + APPROACH_H, yaw, ignore_block_color=color
+        ):
             self._open_gripper()
             self._holding_color = None
             return False
