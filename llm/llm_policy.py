@@ -196,7 +196,12 @@ HIGH_LEVEL_SYSTEM = textwrap.dedent("""
 
 def _build_scene_description(obs_dict: Dict[str, Any],
                               color_cfg: ColorConfig) -> str:
-    """构建场景描述字符串供LLM理解。"""
+    """构建场景描述字符串供 LLM 理解（仅列出本回合激活的颜色，与 obs 槽位一致）。"""
+    active = obs_dict.get("active_colors")
+    if not active:
+        active = list(color_cfg.colors)
+    N = len(active)
+
     lines = []
     lines.append(f"Task: Pick the {obs_dict['pick_color']} block, "
                  f"place it in the {obs_dict['place_color']} bin.")
@@ -204,17 +209,19 @@ def _build_scene_description(obs_dict: Dict[str, Any],
     held = obs_dict.get("held_object")
     lines.append(f"Holding: {held if held else 'nothing'}")
     lines.append("")
+    lines.append(f"There are N={N} active colors this episode. "
+                 f"object_index must be in [0, {2*N-1}] "
+                 f"(0..{N-1}=blocks, {N}..{2*N-1}=bins).")
     lines.append("Object positions (x,y in meters):")
     lines.append("  Blocks:")
 
-    N = color_cfg.n_colors
-    for i, color in enumerate(color_cfg.colors):
+    for i, color in enumerate(active):
         key = f"{color}_block"
         pos = obs_dict["positions"].get(key, [0, 0])
         lines.append(f"    [{i}] {color}_block: x={pos[0]:.3f}, y={pos[1]:.3f}")
 
     lines.append("  Bins:")
-    for i, color in enumerate(color_cfg.colors):
+    for i, color in enumerate(active):
         key = f"{color}_bin"
         pos = obs_dict["positions"].get(key, [0, 0])
         lines.append(f"    [{N+i}] {color}_bin: x={pos[0]:.3f}, y={pos[1]:.3f}")
@@ -256,11 +263,15 @@ class LLMExplorationPolicy:
                  model:        Optional[str] = None,
                  epsilon:      float = 0.2,
                  n_candidates: int = 3,
-                 color_config: ColorConfig = None):
+                 color_config: ColorConfig = None,
+                 n_active:     Optional[int] = None):
 
         self.epsilon      = epsilon
         self.n_candidates = n_candidates
         self.color_cfg    = color_config or get_color_config()
+        # 与 SagittariusPickPlaceEnv.n_active 一致（每回合 obs 槽位数）
+        self.n_active     = int(
+            n_active if n_active is not None else self.color_cfg.n_colors)
 
         model = _resolve_llm_model_name(model)
 
@@ -283,7 +294,7 @@ class LLMExplorationPolicy:
 
         self._code_cache: Dict[str, str] = {}
         print(f"[LLM] model={self.model}, ε={self.epsilon}, "
-              f"colors={self.color_cfg.colors}")
+              f"palette={self.color_cfg.colors}, n_active={self.n_active}")
 
     def should_explore(self) -> bool:
         return np.random.random() < self.epsilon
@@ -294,7 +305,7 @@ class LLMExplorationPolicy:
         object_index: 0..N-1=方块, N..2N-1=桶
         """
         scene_str = _build_scene_description(obs_dict, self.color_cfg)
-        N = self.color_cfg.n_colors
+        N = len(obs_dict.get("active_colors") or []) or self.n_active
 
         messages = [
             {"role": "system",  "content": HIGH_LEVEL_SYSTEM},
@@ -406,13 +417,18 @@ class LLMExplorationPolicy:
         """完整LLM探索：πH → πL → ã_t"""
         primitive, obj_idx = self.call_high_level(obs_dict)
 
-        N = self.color_cfg.n_colors
+        active = list(obs_dict.get("active_colors") or [])
+        if not active:
+            active = list(self.color_cfg.colors[: self.n_active])
+        N = len(active)
+        N = max(N, 1)
+        obj_idx = int(np.clip(obj_idx, 0, 2 * N - 1))
         if obj_idx < N:
-            obj_name = f"{self.color_cfg.idx_to_color(obj_idx)}_block"
+            obj_name = f"{active[obj_idx]}_block"
         else:
-            obj_name = f"{self.color_cfg.idx_to_color(obj_idx - N)}_bin"
+            obj_name = f"{active[obj_idx - N]}_bin"
 
-        # 取对应的图像crop（crops是方块的crops，桶没有单独crop）
+        # 取对应的图像 crop（与 obs 中激活颜色顺序一致）
         crop_idx = min(obj_idx % N, len(crops) - 1)
         if 0 <= crop_idx < len(crops):
             chw  = crops[crop_idx]

@@ -169,27 +169,29 @@ def test_5_env_reset_step():
         import numpy as np
 
         cfg = get_color_config()
-        N   = cfg.n_colors
         env = SagittariusPickPlaceEnv(task="short_horizon", max_steps=3)
+        na  = env.n_active
         ok("环境创建成功")
-        ok(f"  obs_dim={env.obs_dim}  action_dim=4")
+        ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=4")
 
         t0 = time.time()
         obs, info_dict = env.reset()
+        active = list(info_dict.get("active_colors", env._active_colors))
         ok(f"reset() 成功 ({time.time()-t0:.1f}s)  "
            f"pick={info_dict.get('pick_color')}, "
-           f"place={info_dict.get('place_color')}")
+           f"place={info_dict.get('place_color')}  "
+           f"active={active}")
 
         if obs.shape[0] != env.obs_dim:
             fail(f"obs 维度 {obs.shape[0]} ≠ {env.obs_dim}"); return False
         ok(f"  obs 维度正确: {env.obs_dim}")
 
-        img_dim = N * 3 * 28 * 28
-        block_pos = obs[img_dim : img_dim + N*2].reshape(N, 2)
-        bin_pos   = obs[img_dim + N*2 : img_dim + N*4].reshape(N, 2)
+        img_dim = na * 3 * 28 * 28
+        block_pos = obs[img_dim : img_dim + na * 2].reshape(na, 2)
+        bin_pos   = obs[img_dim + na * 2 : img_dim + na * 4].reshape(na, 2)
 
-        info(f"  方块位置[0] ({cfg.colors[0]}): {block_pos[0]}")
-        info(f"  桶位置[0]   ({cfg.colors[0]}): {bin_pos[0]}")
+        info(f"  方块位置[0] ({active[0]}): {block_pos[0]}")
+        info(f"  桶位置[0]   ({active[0]}): {bin_pos[0]}")
 
         if np.all(block_pos == 0):
             warn("方块位置全是 0，检查 Gazebo 物体是否加载")
@@ -199,26 +201,26 @@ def test_5_env_reset_step():
         # ── 检查垃圾桶是否互不重叠 ────────────────────────────────────────
         info("检查垃圾桶位置是否互不重叠（最小间距应 ≥ 0.16 m）...")
         overlap_found = False
-        for i in range(N):
-            for j in range(i + 1, N):
+        for i in range(na):
+            for j in range(i + 1, na):
                 d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
                 if d < 0.14:   # 低于安全阈值
-                    fail(f"  桶 {cfg.colors[i]} 与 {cfg.colors[j]} 距离过近: "
+                    fail(f"  桶 {active[i]} 与 {active[j]} 距离过近: "
                          f"{d:.3f} m（应 ≥ 0.16 m）")
                     overlap_found = True
         if not overlap_found:
-            ok(f"  所有 {N} 个垃圾桶位置互不重叠 ✓")
+            ok(f"  所有 {na} 个激活垃圾桶位置互不重叠 ✓")
         else:
             warn("  存在桶重叠，请检查 _randomize_scene 是否使用了新版代码")
 
         # ── 打印桶的具体坐标 ──────────────────────────────────────────────
         info("桶的具体位置：")
-        for i, c in enumerate(cfg.colors):
+        for i, c in enumerate(active):
             info(f"  {c:10s}_bin : ({bin_pos[i, 0]:.3f}, {bin_pos[i, 1]:.3f})")
 
-        # ── step 测试：pick 正确颜色 ──────────────────────────────────────
+        # ── step 测试：pick 正确颜色（obj_index 为 _active_colors 局部下标）──
         info("\n调用 env.step()（pick 正确颜色方块，约 10-20 秒）...")
-        pick_idx = cfg.color_to_idx(info_dict.get("pick_color"))
+        pick_idx = active.index(info_dict.get("pick_color"))
         action_correct = np.array(
             [0.0, float(pick_idx), 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
@@ -228,7 +230,7 @@ def test_5_env_reset_step():
 
         # ── step 测试：pick 错误颜色（应得到更低 reward） ─────────────────
         info("调用 env.step()（pick 错误颜色方块，约 10-20 秒）...")
-        wrong_idx = (pick_idx + 1) % N   # 选一个不同的颜色
+        wrong_idx = (pick_idx + 1) % na   # 选一个不同的激活颜色
         action_wrong = np.array(
             [0.0, float(wrong_idx), 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
@@ -353,19 +355,29 @@ def test_7_llm_api():
         from config.color_config import get_color_config
 
         cfg    = get_color_config()
+        from envs.pick_place_env import ACTIVE_COLORS_PER_EPISODE
+        na     = min(ACTIVE_COLORS_PER_EPISODE, cfg.n_colors)
+        if na < 2:
+            warn("ColorConfig 颜色数 < 2，跳过 LLM 物体索引语义检查")
+            return True
+        active = list(cfg.colors[:na])
+
         policy = LLMExplorationPolicy(
             api_key=api_key, base_url=llm_base_url(), model=model,
-            epsilon=1.0, n_candidates=1, color_config=cfg)
+            epsilon=1.0, n_candidates=1, color_config=cfg,
+            n_active=na)
 
         positions = {}
-        for i, c in enumerate(cfg.colors):
-            positions[f"{c}_block"] = [0.18+i*0.02, -0.1+i*0.05]
-            positions[f"{c}_bin"]   = [0.35+i*0.01,  0.0+i*0.06]
+        for i, c in enumerate(active):
+            positions[f"{c}_block"] = [0.18 + i * 0.02, -0.1 + i * 0.05]
+            positions[f"{c}_bin"] = [0.35 + i * 0.01, 0.0 + i * 0.06]
 
         obs_dict = {
             "positions":   positions, "gripper": "open",
-            "pick_color":  cfg.colors[0], "place_color": cfg.colors[1],
+            "pick_color":  active[0], "place_color": active[1],
             "held_object": None,
+            "active_colors": active,
+            "n_active":    na,
         }
 
         t0 = time.time()
@@ -373,11 +385,10 @@ def test_7_llm_api():
         ok(f"LLM API 调用成功 ({time.time()-t0:.1f}s)  "
            f"primitive={prim}  obj_idx={obj_idx}")
 
-        N = cfg.n_colors
-        if obj_idx < N:
-            ok(f"  → {cfg.idx_to_color(obj_idx)}_block")
+        if obj_idx < na:
+            ok(f"  → {active[obj_idx]}_block")
         else:
-            ok(f"  → {cfg.idx_to_color(obj_idx-N)}_bin")
+            ok(f"  → {active[obj_idx - na]}_bin")
 
         if prim == 0:
             ok("返回值合理（夹爪 open → 应 pick）")

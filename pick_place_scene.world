@@ -8,11 +8,11 @@
     3. 高度层级重新设计，避免物体重叠产生阴影：
          桌面顶面      z = 0.000
          方块底面      z = 0.001（紧贴桌面，重心 z=0.021）
-         桶底面        z = 0.001（紧贴桌面，重心 z=0.046）
+         桶底面        z = 0.001（紧贴桌面，重心 z=0.060）
          桌体本体      pose z = -0.025（桌厚5cm，顶面恰好在 z=0）
     4. 物体实物尺寸（参照 Lab2 图片）：
          方块：5cm × 5cm × 4cm（彩色泡沫/塑料方块）
-         垃圾桶：外7cm×7cm×9cm，壁厚+底厚各0.5cm，内空6cm×6cm×8.5cm
+         垃圾桶：外7cm×7cm×12cm，壁厚+底厚各0.25cm，内空6.5cm×6.5cm×11.75cm
     5. 空心桶用 5 个 box 拼合（底板 + 四面墙）
     6. 桶声明为 static=true，训练时用 set_model_state 传送到随机位置
     7. 命名约定：{color}_block / {color}_bin
@@ -27,7 +27,7 @@
 
   <!-- ════════════════════════════════════════════════════
        工作台
-       55cm × 55cm × 5cm，桌面顶面位于 z=0
+       70cm × 70cm × 5cm，桌面顶面位于 z=0
        pose z=-0.025 使桌体下沿在 z=-0.05
   ════════════════════════════════════════════════════ -->
   <model name="workspace_table">
@@ -35,7 +35,7 @@
     <pose>0.28 0.0 -0.025 0 0 0</pose>
     <link name="link">
       <visual name="v">
-        <geometry><box><size>0.55 0.55 0.05</size></box></geometry>
+        <geometry><box><size>0.70 0.70 0.05</size></box></geometry>
         <material>
           <ambient>0.88 0.85 0.78 1</ambient>
           <diffuse>0.88 0.85 0.78 1</diffuse>
@@ -43,7 +43,7 @@
         </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.55 0.55 0.05</size></box></geometry>
+        <geometry><box><size>0.70 0.70 0.05</size></box></geometry>
       </collision>
     </link>
   </model>
@@ -150,14 +150,14 @@
 
   <!-- ════════════════════════════════════════════════════
        垃圾桶（空心带底长方体）
-       外尺寸：7cm × 7cm × 9cm
-       壁厚：0.5cm（四面墙）
-       底厚：0.5cm
-       pose z=0.046 = TABLE_Z(0.001) + BIN_H/2(0.045)
+       外尺寸：7cm × 7cm × 12cm
+       壁厚：0.25cm（四面墙）
+       底厚：0.25cm
+       pose z=0.06 = TABLE_Z(0.0) + BIN_H/2(0.06)
 
        每个桶由 5 个 link 拼合：
-         bottom : 底板  7cm×7cm×0.5cm
-         wall_f : 前壁  7cm×0.5cm×8.5cm（贴桶内侧）
+        bottom : 底板  7cm×7cm×0.25cm
+        wall_f : 前壁  7cm×0.25cm×11.75cm（贴桶内侧）
          wall_b : 后壁
          wall_l : 左壁
          wall_r : 右壁
@@ -173,231 +173,231 @@
   <model name="red_bin">
     <static>true</static>
     <!-- spawn位置，训练时会被随机传送 -->
-    <pose>0.35 -0.15 0.046 0 0 0</pose>
+    <pose>0.35 -0.15 0.06 0 0 0</pose>
 
-    <!-- 底板 z_local = -0.045+0.0025 = -0.0425 -->
+    <!-- 底板 z_local = -0.06+0.00125 = -0.05875 -->
     <link name="bottom">
-      <pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+      <pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
 
     <!-- 前壁 (x+方向) -->
     <link name="wall_f">
-      <pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+      <pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
 
     <!-- 后壁 (x-方向) -->
     <link name="wall_b">
-      <pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+      <pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
 
     <!-- 左壁 (y+方向) -->
     <link name="wall_l">
-      <pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+      <pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
 
     <!-- 右壁 (y-方向) -->
     <link name="wall_r">
-      <pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+      <pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
   <!-- ─────────── GREEN BIN ─────────── -->
   <model name="green_bin">
     <static>true</static>
-    <pose>0.35 0.00 0.046 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+    <pose>0.35 0.00 0.06 0 0 0</pose>
+    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
-    <link name="wall_f"><pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_b"><pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_l"><pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_r"><pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
   <!-- ─────────── BLUE BIN ─────────── -->
   <model name="blue_bin">
     <static>true</static>
-    <pose>0.35 0.15 0.046 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+    <pose>0.35 0.15 0.06 0 0 0</pose>
+    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
-    <link name="wall_f"><pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_b"><pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_l"><pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_r"><pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
   <!-- ─────────── YELLOW BIN ─────────── -->
   <model name="yellow_bin">
     <static>true</static>
-    <pose>0.38 -0.08 0.046 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+    <pose>0.38 -0.08 0.06 0 0 0</pose>
+    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
-    <link name="wall_f"><pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_b"><pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_l"><pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_r"><pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
   <!-- ─────────── PINK BIN ─────────── -->
   <model name="pink_bin">
     <static>true</static>
-    <pose>0.38 0.08 0.046 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+    <pose>0.38 0.08 0.06 0 0 0</pose>
+    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
-    <link name="wall_f"><pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_b"><pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_l"><pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_r"><pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 
   <!-- ─────────── ORANGE BIN ─────────── -->
   <model name="orange_bin">
     <static>true</static>
-    <pose>0.36 -0.14 0.046 0 0 0</pose>
-    <link name="bottom"><pose>0 0 -0.0425 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.07 0.07 0.005</size></box></geometry>
+    <pose>0.36 -0.14 0.06 0 0 0</pose>
+    <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.005</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
     </link>
-    <link name="wall_f"><pose>0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_b"><pose>-0.0325 0 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.005 0.07 0.09</size></box></geometry>
+    <link name="wall_b"><pose>-0.03375 0 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.005 0.07 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_l"><pose>0 0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_l"><pose>0 0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
-    <link name="wall_r"><pose>0 -0.0325 0 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.06 0.005 0.09</size></box></geometry>
+    <link name="wall_r"><pose>0 -0.03375 0 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.06 0.005 0.09</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.065 0.0025 0.12</size></box></geometry></collision>
     </link>
   </model>
 

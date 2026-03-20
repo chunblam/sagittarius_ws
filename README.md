@@ -32,7 +32,7 @@ sagittarius_ws/
 ├── eval.py                      ← 评估 + 训练曲线绘图
 ├── test_all.py                  ← 分步环境验证测试
 ├── calibration_guide.py         ← 标定值读取工具
-├── pick_place_scene.world    ← Gazebo 场景（6种颜色，12个物体）
+├── pick_place_scene.world    ← Gazebo 场景（6 色 12 物体模型；训练每回合仅 n_active=3 激活）
 └── README.md
 ```
 
@@ -66,7 +66,9 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 将 `pick_place_scene.world` 的所有 `<model>` 标签复制到你的 Gazebo world 文件中（`<world>` 标签内）。
 
-包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。
+包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
+
+**训练观测维度**：环境每回合随机激活 **`n_active=3`** 种颜色（见 `envs/pick_place_env.py` 中 `ACTIVE_COLORS_PER_EPISODE`），`obs_dim` 随 `n_active` 变化；**与旧版 6 槽位模型不兼容，需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 

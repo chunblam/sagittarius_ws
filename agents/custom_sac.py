@@ -208,37 +208,70 @@ class ExploRLLMSAC(SAC):
             return super()._sample_action(
                 learning_starts, action_noise, n_envs)
 
-    def _parse_obs(self, obs: np.ndarray) -> dict:
-        """从flat observation重建结构化字典，供LLM使用。"""
-        from config.color_config import get_color_config
-        cfg = get_color_config()
-        N   = cfg.n_colors
+    def _unwrap_pick_place_env(self):
+        """从 SB3 包装的 env 链取出 SagittariusPickPlaceEnv（读取 _active_colors）。"""
+        env = self.env
+        if hasattr(env, "envs"):
+            e = env.envs[0]
+        else:
+            e = env
+        for _ in range(16):
+            if hasattr(e, "_active_colors") and hasattr(e, "n_active"):
+                return e
+            if hasattr(e, "env"):
+                e = e.env
+            else:
+                break
+        return None
 
+    def _parse_obs(self, obs: np.ndarray) -> dict:
+        """从 flat observation 重建结构化字典，供 LLM 使用（与 n_active 槽位一致）。"""
+        N = self.n_colors
         img_dim  = N * 3 * CROP_SIZE * CROP_SIZE
         pos_dim  = N * 2
         bin_dim  = N * 2
 
-        block_pos = obs[img_dim : img_dim+pos_dim].reshape(N, 2)
-        bin_pos   = obs[img_dim+pos_dim : img_dim+pos_dim+bin_dim].reshape(N, 2)
-        gripper   = float(obs[img_dim+pos_dim+bin_dim])
-        task      = obs[img_dim+pos_dim+bin_dim+1 :]
+        block_pos = obs[img_dim : img_dim + pos_dim].reshape(N, 2)
+        bin_pos   = obs[img_dim + pos_dim : img_dim + pos_dim + bin_dim].reshape(N, 2)
+        gripper   = float(obs[img_dim + pos_dim + bin_dim])
+        task      = obs[img_dim + pos_dim + bin_dim + 1 :]
 
-        pick_idx  = int(round(float(task[0])))
-        place_idx = int(round(float(task[1])))
-        pick_color  = cfg.idx_to_color(pick_idx)
-        place_color = cfg.idx_to_color(place_idx)
+        pick_local  = int(np.clip(round(float(task[0])), 0, N - 1))
+        place_local = int(np.clip(round(float(task[1])), 0, N - 1))
+
+        ppe = self._unwrap_pick_place_env()
+        if ppe is not None:
+            active = list(ppe._active_colors)[:N]
+        else:
+            from config.color_config import get_color_config
+            cfg = get_color_config()
+            active = list(cfg.colors[:N])
+        if len(active) < N:
+            from config.color_config import get_color_config
+            fill = [c for c in get_color_config().colors if c not in active]
+            active = active + fill[: N - len(active)]
+        active = active[:N]
+
+        pick_color  = active[pick_local]
+        place_color = active[place_local]
 
         positions = {}
-        for i, c in enumerate(cfg.colors):
+        for i, c in enumerate(active[:N]):
             positions[f"{c}_block"] = block_pos[i].tolist()
             positions[f"{c}_bin"]   = bin_pos[i].tolist()
 
+        held = None
+        if ppe is not None and getattr(ppe, "_holding_color", None):
+            held = f"{ppe._holding_color}_block"
+
         return {
-            "positions":   positions,
-            "gripper":     "open" if gripper < 0.5 else "closed",
-            "pick_color":  pick_color,
-            "place_color": place_color,
-            "held_object": f"{pick_color}_block" if gripper >= 0.5 else None,
+            "positions":     positions,
+            "gripper":       "open" if gripper < 0.5 else "closed",
+            "pick_color":    pick_color,
+            "place_color":   place_color,
+            "held_object":   held,
+            "active_colors": active[:N],
+            "n_active":      N,
         }
 
     def _extract_crops(self, obs: np.ndarray) -> np.ndarray:

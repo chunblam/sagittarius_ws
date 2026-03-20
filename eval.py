@@ -93,8 +93,12 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
             steps += 1
             prim  = int(round(float(action[0])))
             obj_i = int(round(float(action[1])))
-            c     = cfg.idx_to_color(obj_i % cfg.n_colors)
-            t_str = "block" if obj_i < cfg.n_colors else "bin"
+            na    = env.n_active
+            ac    = env._active_colors
+            if obj_i < na:
+                c, t_str = ac[obj_i], "block"
+            else:
+                c, t_str = ac[obj_i - na], "bin"
             print(f"  step {steps}: {['pick','place'][prim]} {c}_{t_str}  "
                   f"res=({action[2]:.3f},{action[3]:.3f})  "
                   f"r={r:.3f}  ok={step_info.get('success')}")
@@ -166,8 +170,8 @@ def eval_real_robot(args, n_episodes: int, task: str,
         camera.load_calibration_from_yaml(args.calib_yaml)
 
     print(f"\n[RealEval] 摆放说明：")
-    print(f"  - 方块：桌面左侧区域（x=0.15~0.30 m）")
-    print(f"  - 垃圾桶：桌面右侧区域（x=0.28~0.40 m）")
+    print(f"  - 方块：桌面左侧区域（约 x=0.15~0.32 m）")
+    print(f"  - 垃圾桶：桌面右侧区域（约 x=0.30~0.50 m，与 env BIN_ZONE 一致）")
     print(f"  - VLM 会识别任意颜色，无需提前标定 HSV 阈值")
     print(f"  - 摄像头分辨率建议 ≥ 640×480，均匀照明")
     input("\n  摆好物品后按 Enter 开始...\n")
@@ -200,18 +204,21 @@ def eval_real_robot(args, n_episodes: int, task: str,
         print(f"  {place_c}_bin   : "
               f"({binp[0]:.3f},{binp[1]:.3f})" if binp else "  目标桶未检测到！")
 
-        obs = _inject_camera_positions(obs, scene, cfg)
+        active = list(info.get("active_colors") or env._active_colors)
+        obs = _inject_camera_positions(obs, scene, active)
 
         ep_r = 0.0
         done = trunc = False
         while not (done or trunc):
             # 每步刷新场景（方块被抓起后位置变化）
             scene = camera.scan_scene(wait_sec=0.2, n_retry=1)
-            obs   = _inject_camera_positions(obs, scene, cfg)
+            active = list(env._active_colors)
+            obs   = _inject_camera_positions(obs, scene, active)
 
             action, _ = model.predict(obs, deterministic=True)
-            obs, r, done, trunc, _ = env.step(action)
-            obs = _inject_camera_positions(obs, scene, cfg)
+            obs, r, done, trunc, step_info = env.step(action)
+            active = list(step_info.get("active_colors") or env._active_colors)
+            obs = _inject_camera_positions(obs, scene, active)
             ep_r += r
 
         rewards.append(ep_r)
@@ -228,20 +235,21 @@ def eval_real_robot(args, n_episodes: int, task: str,
     return {"success_rate": sr, "mean_reward": float(np.mean(rewards))}
 
 
-def _inject_camera_positions(obs: np.ndarray, scene: dict, cfg) -> np.ndarray:
-    """将摄像头检测到的坐标注入 observation 向量（替换 Gazebo GT 坐标）。"""
+def _inject_camera_positions(obs: np.ndarray, scene: dict,
+                             active_colors: list) -> np.ndarray:
+    """将摄像头检测到的坐标注入 observation（顺序与 env 的 active_colors 槽位一致）。"""
     obs = obs.copy()
-    N       = cfg.n_colors
+    N       = len(active_colors)
     img_dim = N * 3 * 28 * 28
     pos_dim = N * 2
 
-    for i, c in enumerate(cfg.colors):
+    for i, c in enumerate(active_colors):
         pos = scene["blocks"].get(c)
         if pos is not None:
             s = img_dim + i * 2
             obs[s], obs[s+1] = pos[0], pos[1]
 
-    for i, c in enumerate(cfg.colors):
+    for i, c in enumerate(active_colors):
         pos = scene["bins"].get(c)
         if pos is not None:
             s = img_dim + pos_dim + i * 2

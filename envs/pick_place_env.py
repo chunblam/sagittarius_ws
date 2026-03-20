@@ -10,15 +10,15 @@ pick_place_env.py
   变化3：observation向量用颜色index代替one-hot（支持任意颜色数）
   变化4：observation包含桶的位置（因为桶不再固定，必须告诉policy桶在哪）
 
-Observation向量新布局：
+Observation向量新布局（N = n_active，每回合从 color_cfg 随机抽 ACTIVE_COLORS_PER_EPISODE 种）：
   [img_patches | block_positions | bin_positions | gripper | task_encoding]
-   14112          N_COLORS*2        N_COLORS*2      1         2
+   N*3*28*28      N*2              N*2             1         2
 
-  其中 task_encoding = [pick_color_idx, place_color_idx]，整数。
+  task_encoding = [pick_local_idx, place_local_idx]，在 _active_colors 中的下标 0..N-1。
 
-Action向量不变：
-  [primitive(0-1), obj_index(0-2*N_COLORS-1), res_x, res_y]
-  obj_index 现在覆盖：前N_COLORS个 = 方块，后N_COLORS个 = 垃圾桶
+Action向量：
+  [primitive(0-1), obj_index(0-2*N-1), res_x, res_y]
+  前 N 个 = 激活颜色方块，后 N 个 = 激活颜色垃圾桶（顺序与 _active_colors 一致）。
 """
 
 import os
@@ -48,29 +48,64 @@ from config.color_config import ColorConfig, get_color_config
 
 # ── 场景参数 ──────────────────────────────────────────────────────────────────
 
+# 每个 episode 实际激活的颜色数量
+# 从全部颜色中随机选取这么多种，同时出现在桌面上
+# 设为 3 的理由：
+#   - 3 个桶在扩大后的区域里轻松不重叠（间距充足）
+#   - 减少 observation 中无用颜色槽位的噪声
+#   - 训练收敛更快，泛化性不受影响（每次颜色随机不同）
+ACTIVE_COLORS_PER_EPISODE = 3
+
 # 方块随机化区域（桌面左半部分）
-BLOCK_ZONE_X = (0.15, 0.30)
-BLOCK_ZONE_Y = (-0.18, 0.18)
+# x: 0.15~0.32（17cm），y: ±0.22（44cm）
+# 3 个方块（5cm，间距 0.09m）完全放得下
+BLOCK_ZONE_X = (0.15, 0.32)
+BLOCK_ZONE_Y = (-0.22, 0.22)
+BLOCK_MIN_GAP = 0.09   # 5cm方块 + 4cm间隙，互不碰撞
 
 # 垃圾桶随机化区域（桌面右半部分）
-BIN_ZONE_X   = (0.28, 0.40)
-BIN_ZONE_Y   = (-0.18, 0.18)
+# x: 0.30~0.50（20cm，2列），y: ±0.24（48cm，3行）
+# 最多 2×3=6 个桶，间距 0.16m 时 3 个桶绰绰有余
+BIN_ZONE_X   = (0.30, 0.50)
+BIN_ZONE_Y   = (-0.24, 0.24)
+BIN_MIN_GAP  = 0.16   # 7cm桶对角线0.099m，0.16m确保边缘间距≥6cm
 
-TABLE_Z       = 0.02   # 桌面高度
+# 高度参数（z轴，单位米）
+# ──────────────────────────────────────────────────────────
+# 坐标系约定（与 world 文件一致）：
+#   桌面顶面 z = 0.00（world文件桌面顶面在z=0）
+#   方块底面 z = 0.00，方块重心 z = BLOCK_H/2 = 0.02
+#   桶底面   z = 0.00，桶重心   z = BIN_H/2   = 0.06
+#
+# GRASP_H 修正：
+#   原来 TABLE_Z + GRASP_H = 0.00 + 0.005 = 0.005m
+#   方块顶面在 z = TABLE_Z + BLOCK_H = 0.00 + 0.04 = 0.04m
+#   末端只到 0.025m，在桌面里，触发碰撞检测 → CONTROL_FAILED
+#   正确值：末端应到达方块中部稍上方
+#   TABLE_Z + GRASP_H = TABLE_Z + BLOCK_H/2 + 0.005 = 0.025m
+#   → GRASP_H = BLOCK_H/2 + 0.005 = 0.025m
+#
+# APPROACH_H 修正：
+#   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
+#   TABLE_Z + APPROACH_H = 0.18m（高于桶顶2cm，便于抬起后验证）
+# ──────────────────────────────────────────────────────────
+TABLE_Z       = 0.00   # 桌面顶面（world文件里桌面顶面在 z=0）
 BLOCK_H       = 0.04   # 方块高度
-BIN_H         = 0.09   # 垃圾桶高度（重心在 TABLE_Z + BIN_H/2）
+BLOCK_W       = 0.05   # 方块边长（x/y）
+BIN_H         = 0.12   # 垃圾桶高度（外高）
+BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
+BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
-# 运动高度
-APPROACH_H    = 0.13
-GRASP_H       = 0.005
-PLACE_H       = 0.07
+APPROACH_H    = 0.18   # 接近高度（末端 z = 0.18m）
+GRASP_H       = 0.025  # 抓取高度（末端 z = 0.025m ≈ 方块中部）
+PLACE_H       = 0.11   # 放置高度（末端 z = 0.11m，接近桶口内部）
 
 # 图像crop参数
 CROP_SIZE     = 28
-POSITION_NOISE_SIGMA = 0.035
+POSITION_NOISE_SIGMA = 0.030   # 稍微降低噪声，6→3颜色后精度可以提高
 
 # MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
-MOVEIT_ARM_HOME_STATE = "home"       # 常见另有 up / sleep，勿写成 Home
+MOVEIT_ARM_HOME_STATE = "home"
 MOVEIT_GRIPPER_OPEN_STATE = "open"
 MOVEIT_GRIPPER_CLOSE_STATE = "close"
 
@@ -104,19 +139,26 @@ class SagittariusPickPlaceEnv(gym.Env):
         self.noise_sigma = noise_sigma
         self.color_cfg   = color_config or get_color_config(yaml_path)
 
-        N = self.color_cfg.n_colors   # 颜色总数（动态）
+        # 每个 episode 激活的颜色数（从全部颜色中随机抽取）
+        # N_active <= color_cfg.n_colors
+        self.n_active = min(ACTIVE_COLORS_PER_EPISODE,
+                            self.color_cfg.n_colors)
+        # 当前 episode 激活的颜色子集（每次 reset 重新抽取）
+        self._active_colors: list = self.color_cfg.colors[:self.n_active]
+
+        N = self.n_active   # observation/action 维度基于激活数量
 
         # 当前episode的任务颜色
-        self.pick_color:  str = self.color_cfg.colors[0]
-        self.place_color: str = self.color_cfg.colors[1]
+        self.pick_color:  str = self._active_colors[0]
+        self.place_color: str = self._active_colors[1]
         self._step_count   = 0
         self._gripper_open = True
-        self._holding_color: str = None   # 当前夹着哪种颜色的方块
+        self._holding_color: str = None
 
         # ── 观测空间 ──────────────────────────────────────────────────────
-        # img: N_colors * 3 * 28 * 28
-        # block_positions: N_colors * 2
-        # bin_positions:   N_colors * 2
+        # img: n_active * 3 * 28 * 28
+        # block_positions: n_active * 2
+        # bin_positions:   n_active * 2
         # gripper: 1
         # task: 2 (pick_idx, place_idx，整数但存为float)
         img_dim   = N * 3 * CROP_SIZE * CROP_SIZE
@@ -130,7 +172,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         self.pos_dim  = pos_dim
         self.bin_dim  = bin_dim
         self.obs_dim  = obs_dim
-        self.N        = N
+        self.N        = N   # = n_active
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
@@ -139,8 +181,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         # ── 动作空间 ──────────────────────────────────────────────────────
         # [primitive(0-1), obj_index(0 to 2N-1), res_x, res_y]
-        # obj_index 0..N-1 = 方块索引（对应color_cfg.colors）
-        # obj_index N..2N-1 = 桶索引
+        # obj_index 0..N-1 = 方块（本回合 _active_colors 顺序）
+        # obj_index N..2N-1 = 桶索引（同上）
         self.action_space = spaces.Box(
             low=np.array( [0.0, 0.0, -0.05, -0.05], dtype=np.float32),
             high=np.array([1.0, float(2*N-1), 0.05, 0.05], dtype=np.float32)
@@ -252,108 +294,120 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _randomize_scene(self):
         """
-        随机化所有方块和垃圾桶的位置，保证同类物体互不重叠。
+        随机化场景：
+          1. 从全部颜色中随机抽取 n_active 种颜色作为本 episode 的激活颜色
+          2. 把激活颜色的方块随机摆在左半区，桶随机摆在右半区
+          3. 非激活颜色的物体传送到桌面外的停靠区，不干扰仿真
+          4. 保证同区域内物体互不重叠，100次失败后使用确定性网格 fallback
 
-        修复说明（对应截图中桶大量重叠的根因）：
-          1. 桶最小间距 0.10 → 0.16 m
-             空心长方体外廓对角线 ≈ sqrt(0.07²+0.07²) ≈ 0.099 m；
-             0.16 m 确保两桶边缘之间有约 6 cm 安全间距，不会物理穿透。
-          2. 桶的 y 区域扩展到 ±0.22 m（原 ±0.18 m 只有 0.36 m，
-             6 个桶需要约 6×0.16 = 0.96 m，空间根本不够）。
-          3. 尝试次数 50 → 100，减少随机失败概率。
-          4. 100 次仍失败时 fallback 到均匀网格摆放，
-             杜绝静默跳过 teleport（静默跳过是桶堆在 world 默认位置的直接原因）。
-          5. 方块间距保持 0.08 m（5 cm 方块，足够）。
+        网格 fallback 算法（修正版）：
+          之前的 linspace 方案在 x 方向宽度不足时生成的网格间距不满足要求。
+          新方案：先算出每行能放多少个（floor(zone_x_width / gap)），
+          再按行优先枚举（x 先排满一行再换 y），保证每个点都满足间距。
         """
         rng = np.random.default_rng()
 
-        # ── 辅助：生成均匀网格位置（fallback 用） ────────────────────────
-        def _grid_positions(n: int, zone_x: tuple, zone_y: tuple,
-                            gap: float) -> list:
-            """在 zone 内生成最多 n 个均匀分布的网格坐标。"""
+        # ── Step 1: 抽取本 episode 的激活颜色 ─────────────────────────────
+        all_colors = list(self.color_cfg.colors)
+        rng.shuffle(all_colors)
+        self._active_colors = all_colors[: self.n_active]
+        inactive_colors     = all_colors[self.n_active :]
+
+        # 更新任务颜色（确保在激活颜色里）
+        self.pick_color  = self._active_colors[0]
+        remaining        = [c for c in self._active_colors
+                            if c != self.pick_color]
+        self.place_color = rng.choice(remaining) if remaining else self._active_colors[0]
+
+        # ── Step 2: 把非激活颜色的物体挪走（停靠区，不干扰桌面） ──────────
+        PARK_X, PARK_Y_START = 2.0, 0.0   # 远离桌面
+        for i, color in enumerate(inactive_colors):
+            park_y = PARK_Y_START + i * 0.2
+            self._teleport(block_name(color), PARK_X, park_y, 0.02)
+            self._teleport(bin_name(color),   PARK_X + 0.5, park_y, 0.05)
+
+        # ── Step 3: 正确的网格生成（保证间距 ≥ gap） ─────────────────────
+        def _deterministic_grid(n: int, zone_x: tuple,
+                                zone_y: tuple, gap: float) -> list:
+            """
+            生成最多 n 个位置的均匀网格，保证任意两点间距 ≥ gap。
+            按行优先枚举：先沿 x 方向排满一行，再移到下一行。
+            """
             cols = max(1, int((zone_x[1] - zone_x[0]) / gap))
             rows = max(1, int((zone_y[1] - zone_y[0]) / gap))
-            xs = np.linspace(zone_x[0] + gap / 2,
-                             zone_x[1] - gap / 2, min(cols, n))
-            ys = np.linspace(zone_y[0] + gap / 2,
-                             zone_y[1] - gap / 2,
-                             max(1, int(np.ceil(n / max(len(xs), 1)))))
-            pts = [(float(x), float(y)) for y in ys for x in xs]
+            pts  = []
+            for row in range(rows):
+                for col in range(cols):
+                    cx = zone_x[0] + gap * (col + 0.5)
+                    cy = zone_y[0] + gap * (row + 0.5)
+                    if cx <= zone_x[1] and cy <= zone_y[1]:
+                        pts.append((cx, cy))
+                    if len(pts) >= n:
+                        return pts
             return pts[:n]
 
-        # ── 随机化方块 ────────────────────────────────────────────────────
+        # ── Step 4: 随机化方块 ────────────────────────────────────────────
         placed_blocks = []
-        BLOCK_MIN_GAP = 0.08
-        for idx, color in enumerate(self.color_cfg.colors):
-            name = block_name(color)
+        for idx, color in enumerate(self._active_colors):
+            name   = block_name(color)
             placed = False
-            for _ in range(100):
+            for _ in range(150):
                 x = rng.uniform(*BLOCK_ZONE_X)
                 y = rng.uniform(*BLOCK_ZONE_Y)
                 if all(np.linalg.norm([x - px, y - py]) > BLOCK_MIN_GAP
                        for px, py in placed_blocks):
                     placed_blocks.append((x, y))
-                    self._teleport(name, x, y, TABLE_Z + BLOCK_H / 2)
+                    self._teleport(name, x, y, BLOCK_H / 2)
                     placed = True
                     break
 
             if not placed:
-                # Fallback：网格位置，不能静默跳过
-                grid = _grid_positions(
-                    len(self.color_cfg.colors),
-                    BLOCK_ZONE_X, BLOCK_ZONE_Y, BLOCK_MIN_GAP)
+                grid = _deterministic_grid(
+                    self.n_active, BLOCK_ZONE_X, BLOCK_ZONE_Y, BLOCK_MIN_GAP)
                 if idx < len(grid):
                     x, y = grid[idx]
                     placed_blocks.append((x, y))
-                    self._teleport(name, x, y, TABLE_Z + BLOCK_H / 2)
+                    self._teleport(name, x, y, BLOCK_H / 2)
                     rospy.logwarn(
-                        f"[Env] 方块 {color} 随机摆放失败，fallback 网格 "
-                        f"({x:.3f}, {y:.3f})")
+                        f"[Env] 方块 {color} 随机摆放失败，"
+                        f"fallback 网格 ({x:.3f}, {y:.3f})")
 
-        # ── 随机化垃圾桶 ──────────────────────────────────────────────────
-        # 关键参数：
-        #   BIN_MIN_GAP = 0.16 m（中心间距），空心长方体 0.07 m 边长，留 ~6 cm 边缘间隙
-        #   BIN_ZONE_Y_WIDE = ±0.22 m，扩展 y 方向以容纳 6 个桶
-        BIN_MIN_GAP    = 0.16
-        BIN_ZONE_Y_WIDE = (-0.22, 0.22)
-
+        # ── Step 5: 随机化垃圾桶 ──────────────────────────────────────────
         placed_bins = []
-        for idx, color in enumerate(self.color_cfg.colors):
-            name = bin_name(color)
+        for idx, color in enumerate(self._active_colors):
+            name   = bin_name(color)
             placed = False
-            for _ in range(100):
+            for _ in range(150):
                 x = rng.uniform(*BIN_ZONE_X)
-                y = rng.uniform(*BIN_ZONE_Y_WIDE)
+                y = rng.uniform(*BIN_ZONE_Y)
                 if all(np.linalg.norm([x - px, y - py]) > BIN_MIN_GAP
                        for px, py in placed_bins):
                     placed_bins.append((x, y))
-                    self._teleport(name, x, y, TABLE_Z + BIN_H / 2)
+                    self._teleport(name, x, y, BIN_H / 2)
                     placed = True
                     break
 
             if not placed:
-                # Fallback：网格位置，绝不静默跳过
-                grid = _grid_positions(
-                    len(self.color_cfg.colors),
-                    BIN_ZONE_X, BIN_ZONE_Y_WIDE, BIN_MIN_GAP)
+                grid = _deterministic_grid(
+                    self.n_active, BIN_ZONE_X, BIN_ZONE_Y, BIN_MIN_GAP)
                 if idx < len(grid):
                     x, y = grid[idx]
                     placed_bins.append((x, y))
-                    self._teleport(name, x, y, TABLE_Z + BIN_H / 2)
+                    self._teleport(name, x, y, BIN_H / 2)
                     rospy.logwarn(
-                        f"[Env] 垃圾桶 {color} 随机摆放失败，fallback 网格 "
-                        f"({x:.3f}, {y:.3f})")
+                        f"[Env] 垃圾桶 {color} 随机摆放失败，"
+                        f"fallback 网格 ({x:.3f}, {y:.3f})")
                 else:
                     rospy.logerr(
-                        f"[Env] 垃圾桶 {color} 无法摆放！网格也满了。"
-                        f"请减少颜色数量或扩大 BIN_ZONE。")
+                        f"[Env] 垃圾桶 {color} 无法摆放！"
+                        f"请扩大 BIN_ZONE 或减少 n_active。")
 
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
     def _refresh_positions(self):
-        """刷新所有物体的带噪声位置缓存（每次step调用）。"""
+        """刷新激活颜色物体的带噪声位置缓存（每次step调用）。"""
         noise = lambda: np.random.normal(0, self.noise_sigma, 2)
-        for color in self.color_cfg.colors:
+        for color in self._active_colors:
             xyz = self._get_pose(block_name(color))
             self._block_positions[color] = xyz[:2] + noise()
             xyz = self._get_pose(bin_name(color))
@@ -371,17 +425,15 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_crops(self) -> np.ndarray:
         """
-        提取每种颜色对应的图像crop。
-        顺序：[color_0_block, color_1_block, ..., color_0_bin, ...]
-        等等——其实observation里我们只放方块的crop，桶的位置用坐标表示。
-        返回形状 (N, 3, 28, 28)
+        提取激活颜色方块对应的图像 crop。
+        返回形状 (n_active, 3, 28, 28)
         """
         import cv2
         crops = []
         img = self._latest_image
 
-        for color in self.color_cfg.colors:
-            block_pos = self._get_block_pos(color)   # (x,y) in robot frame
+        for color in self._active_colors:
+            block_pos = self._get_block_pos(color)
             if img is not None:
                 u, v = self._robot_to_pixel(block_pos)
                 h, w = img.shape[:2]
@@ -395,7 +447,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                 crop = np.zeros((28, 28, 3), dtype=np.float32)
             crops.append(crop.transpose(2, 0, 1))
 
-        return np.array(crops, dtype=np.float32)  # (N, 3, 28, 28)
+        return np.array(crops, dtype=np.float32)  # (n_active, 3, 28, 28)
 
     def _robot_to_pixel(self, xy: np.ndarray) -> Tuple[float, float]:
         """机械臂坐标 → 像素坐标（需要标定值）。"""
@@ -409,40 +461,33 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_observation(self) -> np.ndarray:
         """
-        构建完整observation向量。
-
-        新布局（相比原版增加了bin_positions和改了task编码）：
-          [crops(N*3*28*28) | block_pos(N*2) | bin_pos(N*2) | gripper(1) | task(2)]
+        构建完整 observation 向量（仅包含激活颜色）。
+        布局：[crops(N*3*28*28) | block_pos(N*2) | bin_pos(N*2) | gripper(1) | task(2)]
+        N = n_active（本 episode 激活的颜色数）
         """
         self._refresh_positions()
 
-        crops = self._build_crops()   # (N, 3, 28, 28)
+        crops = self._build_crops()   # (n_active, 3, 28, 28)
 
-        # 方块位置
         block_pos = np.array(
-            [self._get_block_pos(c) for c in self.color_cfg.colors],
-            dtype=np.float32).flatten()   # (N*2,)
+            [self._get_block_pos(c) for c in self._active_colors],
+            dtype=np.float32).flatten()
 
-        # 桶位置（重要升级：现在包含在observation里）
         bin_pos = np.array(
-            [self._get_bin_pos(c) for c in self.color_cfg.colors],
-            dtype=np.float32).flatten()   # (N*2,)
+            [self._get_bin_pos(c) for c in self._active_colors],
+            dtype=np.float32).flatten()
 
         gripper = np.array(
             [0.0 if self._gripper_open else 1.0], dtype=np.float32)
 
-        # 任务编码：两个整数index（不再是one-hot，支持任意颜色数）
-        task = np.array([
-            float(self.color_cfg.color_to_idx(self.pick_color)),
-            float(self.color_cfg.color_to_idx(self.place_color)),
-        ], dtype=np.float32)
+        # 任务编码：在 _active_colors 列表中的局部 index（0~n_active-1）
+        pick_local  = self._active_colors.index(self.pick_color)
+        place_local = self._active_colors.index(self.place_color)
+        task = np.array([float(pick_local), float(place_local)],
+                        dtype=np.float32)
 
         obs = np.concatenate([
-            crops.flatten(),   # N*3*28*28
-            block_pos,         # N*2
-            bin_pos,           # N*2
-            gripper,           # 1
-            task,              # 2
+            crops.flatten(), block_pos, bin_pos, gripper, task,
         ]).astype(np.float32)
 
         assert obs.shape == (self.obs_dim,), \
@@ -502,29 +547,29 @@ class SagittariusPickPlaceEnv(gym.Env):
           验证失败（方块仍在桌面）则开爪放弃，返回 False。
           这确保 success=True 时方块确实被夹住，奖励信号可信。
         """
-        # 抓取验证阈值：TABLE_Z + BLOCK_H + 0.025 m 保守裕量
-        GRASP_VERIFY_Z = TABLE_Z + BLOCK_H + 0.025
+        # 抬起验证阈值：必须高于桶口，再额外留 2cm 裕量
+        LIFT_VERIFY_Z = TABLE_Z + BIN_H + 0.02
 
         self._open_gripper()
         if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
         if not self._move_to_xy(x, y, TABLE_Z + GRASP_H):    return False
         self._close_gripper()
-
-        # ── 物理验证：方块是否被抬起 ───────────────────────────────────
-        time.sleep(0.25)   # 等 Gazebo 物理引擎稳定
-        block_z = self._get_pose(block_name(color))[2]
-        if block_z < GRASP_VERIFY_Z:
-            rospy.logwarn(
-                f"[Env] 抓取验证失败 {color}_block: z={block_z:.4f} "
-                f"< 阈值 {GRASP_VERIFY_Z:.4f}，开爪放弃")
-            self._open_gripper()
-            return False
-
-        self._holding_color = color
         if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H):
             self._open_gripper()
             self._holding_color = None
             return False
+
+        # ── 物理验证：抬起动作结束后再检查 z（不依赖固定 sleep） ─────────
+        block_z = self._get_pose(block_name(color))[2]
+        if block_z < LIFT_VERIFY_Z:
+            rospy.logwarn(
+                f"[Env] 抓取验证失败 {color}_block: z={block_z:.4f} "
+                f"< 阈值 {LIFT_VERIFY_Z:.4f}，开爪放弃")
+            self._open_gripper()
+            self._holding_color = None
+            return False
+
+        self._holding_color = color
         return True
 
     def _execute_place(self, x: float, y: float) -> bool:
@@ -601,10 +646,8 @@ class SagittariusPickPlaceEnv(gym.Env):
             if not success:
                 r -= 0.2
             else:
-                # 运动成功：检查方块是否真的进入目标桶（0.07 m 半径内）
-                block_pos  = self._get_pose(block_name(self.pick_color))[:2]
-                bin_gt_pos = self._get_pose(bin_name(self.place_color))[:2]
-                if float(np.linalg.norm(block_pos - bin_gt_pos)) < 0.07:
+                # 运动成功：检查方块是否真的进入目标桶内腔
+                if self._is_block_in_target_bin():
                     r += 2.0   # 放置成功
 
             # Terminal bonus：任务完全完成时单独叠加（与中间 shaping 量级分开）
@@ -613,38 +656,51 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         return float(r)
 
+    def _is_block_in_target_bin(self) -> bool:
+        """
+        判断目标方块是否进入目标桶内腔。
+        条件：
+          1) 方块中心在桶内腔投影范围内（并扣除方块半宽，避免贴壁误判）；
+          2) 方块中心 z 在桶口以下。
+        """
+        block_xyz = self._get_pose(block_name(self.pick_color))
+        bin_xyz   = self._get_pose(bin_name(self.place_color))
+
+        dx = float(abs(block_xyz[0] - bin_xyz[0]))
+        dy = float(abs(block_xyz[1] - bin_xyz[1]))
+
+        inner_half = BIN_INNER_W / 2.0
+        block_half = BLOCK_W / 2.0
+        margin_xy  = max(inner_half - block_half, 0.0)
+
+        inside_xy = (dx <= margin_xy) and (dy <= margin_xy)
+        below_rim = float(block_xyz[2]) < (TABLE_Z + BIN_H)
+        return bool(inside_xy and below_rim)
+
     def _check_done(self) -> bool:
-        """检查当前任务是否完成。"""
-        block_pos = self._get_pose(block_name(self.pick_color))[:2]
-        bin_pos   = self._get_pose(bin_name(self.place_color))[:2]
-        return np.linalg.norm(block_pos - bin_pos) < 0.06
+        """检查当前任务是否完成（目标方块确实在目标桶内腔）。"""
+        return self._is_block_in_target_bin()
 
     # ── Gymnasium API ─────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._init_ros()
-        self._step_count   = 0
-        self._gripper_open = True
+        self._step_count    = 0
+        self._gripper_open  = True
         self._holding_color = None
 
-        # 随机采样任务颜色（确保pick和place是不同颜色）
-        rng = np.random.default_rng(seed)
-        colors = self.color_cfg.colors
-        self.pick_color  = rng.choice(colors)
-        remaining        = [c for c in colors if c != self.pick_color]
-        self.place_color = rng.choice(remaining)
-
-        # 随机化场景
+        # _randomize_scene 内部会重新抽取 _active_colors 和任务颜色
         self._randomize_scene()
-        time.sleep(0.5)   # 等Gazebo物理引擎稳定
+        time.sleep(0.5)
         self._return_home()
 
         obs  = self._build_observation()
         info = {
-            "pick_color":  self.pick_color,
-            "place_color": self.place_color,
-            "n_colors":    self.N,
+            "pick_color":    self.pick_color,
+            "place_color":   self.place_color,
+            "active_colors": list(self._active_colors),
+            "n_colors":      self.n_active,
         }
         return obs, info
 
@@ -656,13 +712,14 @@ class SagittariusPickPlaceEnv(gym.Env):
         obj_idx   = int(np.round(np.clip(action[1], 0, 2*self.N - 1)))
         res_xy    = np.clip(action[2:4], -0.05, 0.05)
 
-        # obj_idx 0..N-1 = 方块，N..2N-1 = 桶
+        # obj_idx 0..N-1 = 方块，N..2N-1 = 桶（N = n_active）
+        # 颜色映射基于本 episode 的 _active_colors（而非全部颜色）
         if obj_idx < self.N:
-            color    = self.color_cfg.idx_to_color(obj_idx)
-            base_xy  = self._get_block_pos(color)
+            color   = self._active_colors[obj_idx]
+            base_xy = self._get_block_pos(color)
         else:
-            color    = self.color_cfg.idx_to_color(obj_idx - self.N)
-            base_xy  = self._get_bin_pos(color)
+            color   = self._active_colors[obj_idx - self.N]
+            base_xy = self._get_bin_pos(color)
 
         target_xy = np.clip(
             base_xy + res_xy,
@@ -686,14 +743,15 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         obs = self._build_observation()
         info = {
-            "primitive":  primitive,
-            "color":      color,
-            "obj_idx":    obj_idx,
-            "target_xy":  target_xy.tolist(),
-            "success":    success,
-            "step":       self._step_count,
-            "pick_color": self.pick_color,
-            "place_color":self.place_color,
+            "primitive":     primitive,
+            "color":         color,
+            "obj_idx":       obj_idx,
+            "target_xy":     target_xy.tolist(),
+            "success":       success,
+            "step":          self._step_count,
+            "pick_color":    self.pick_color,
+            "place_color":   self.place_color,
+            "active_colors": list(self._active_colors),
         }
         return obs, reward, terminated, truncated, info
 

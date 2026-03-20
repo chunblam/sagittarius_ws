@@ -108,8 +108,6 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     if args.colors:
         color_cfg.colors = [c for c in args.colors if c in color_cfg.colors or True]
         color_cfg._build_index()
-    print(f"[Train] 颜色: {color_cfg.colors}  (N={color_cfg.n_colors})")
-
     log_dir  = Path(args.log_dir) / run_name
     ckpt_dir = log_dir / "checkpoints"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -120,8 +118,6 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
 
     if not rospy.core.is_initialized():
         rospy.init_node("explorllm_train", anonymous=True)
-
-    N = color_cfg.n_colors
 
     train_env = Monitor(
         SagittariusPickPlaceEnv(
@@ -135,6 +131,11 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
             color_config=color_cfg, noise_sigma=0.0),
         filename=str(log_dir / "eval_monitor.csv"))
 
+    # 网络与动作空间维度 = 每回合激活颜色数 n_active（非 color_cfg.n_colors）
+    na = train_env.env.n_active
+    print(f"[Train] 颜色配置: {color_cfg.colors}  (ColorConfig N={color_cfg.n_colors})")
+    print(f"[Train] 观测/策略维度 n_active={na}  obs_dim={train_env.env.obs_dim}")
+
     # LLM 探索策略（文字接口，训练阶段使用）
     # 密钥可从环境变量 LLM_API_KEY 读取，无需在命令行传 --api-key
     llm_policy = None
@@ -145,16 +146,17 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
             api_key=args.api_key or None,
             base_url=args.base_url,
             model=args.model, epsilon=epsilon,
-            n_candidates=args.n_candidates, color_config=color_cfg)
+            n_candidates=args.n_candidates, color_config=color_cfg,
+            n_active=na)
         print(f"[Train] LLM 探索策略：model={args.model}, ε={epsilon}")
     elif epsilon > 0.0:
         print("[Train] 警告：ε>0 但无 API Key（请设 LLM_API_KEY 或 --api-key），以 ε=0 运行")
 
-    policy_kwargs = make_sac_kwargs(n_colors=N, features_dim=128)
+    policy_kwargs = make_sac_kwargs(n_colors=na, features_dim=128)
     model = ExploRLLMSAC(
         policy="MlpPolicy", env=train_env,
         llm_policy=llm_policy, warmup_steps=args.warmup_steps,
-        n_colors=N, learning_rate=args.learning_rate,
+        n_colors=na, learning_rate=args.learning_rate,
         buffer_size=args.buffer_size, batch_size=args.batch_size,
         learning_starts=args.learning_starts,
         policy_kwargs=policy_kwargs, device=args.device,
@@ -215,6 +217,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         "vlm_base_url":args.vlm_base_url,
         "calib_yaml":  args.calib_yaml,
         "colors":      color_cfg.colors,
+        "n_active":    na,
     }
     with open(log_dir/"vlm_config.json","w") as f:
         json.dump(vlm_config, f, indent=2)
