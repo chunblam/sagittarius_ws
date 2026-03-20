@@ -14,7 +14,7 @@
          方块：5cm × 5cm × 4cm（彩色泡沫/塑料方块）
          垃圾桶：外7cm×7cm×12cm，壁厚+底厚各0.25cm，内空6.5cm×6.5cm×11.75cm
     5. 空心桶用 5 个 box 拼合（底板 + 四面墙）
-    6. 桶声明为 static=true，训练时用 set_model_state 传送到随机位置
+    6. 桶声明为 static=false，可与方块一样参与随机位置与物理碰撞
     7. 命名约定：{color}_block / {color}_bin
     8. 本文件只包含物体模型，不含 ground/sun/physics 配置
 
@@ -58,7 +58,7 @@
     <pose>0.18 -0.12 0.021 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.05</mass>
+        <mass>0.012</mass>
         <inertia><ixx>1.4e-5</ixx><ixy>0</ixy><ixz>0</ixz>
                  <iyy>1.4e-5</iyy><iyz>0</iyz><izz>2.1e-5</izz></inertia>
       </inertial>
@@ -76,7 +76,7 @@
   <model name="green_block">
     <pose>0.22 -0.04 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.05</mass></inertial>
+      <inertial><mass>0.012</mass></inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.10 0.80 0.15 1</ambient><diffuse>0.10 0.80 0.15 1</diffuse></material>
@@ -91,7 +91,7 @@
   <model name="blue_block">
     <pose>0.18 0.06 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.05</mass></inertial>
+      <inertial><mass>0.012</mass></inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.10 0.20 0.90 1</ambient><diffuse>0.10 0.20 0.90 1</diffuse></material>
@@ -106,7 +106,7 @@
   <model name="yellow_block">
     <pose>0.24 0.14 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.05</mass></inertial>
+      <inertial><mass>0.012</mass></inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.90 0.05 1</ambient><diffuse>0.95 0.90 0.05 1</diffuse></material>
@@ -121,7 +121,7 @@
   <model name="pink_block">
     <pose>0.20 -0.16 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.05</mass></inertial>
+      <inertial><mass>0.012</mass></inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.40 0.70 1</ambient><diffuse>0.95 0.40 0.70 1</diffuse></material>
@@ -136,7 +136,7 @@
   <model name="orange_block">
     <pose>0.26 0.00 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.05</mass></inertial>
+      <inertial><mass>0.012</mass></inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.50 0.05 1</ambient><diffuse>0.95 0.50 0.05 1</diffuse></material>
@@ -171,7 +171,7 @@
 
   <!-- ─────────── RED BIN ─────────── -->
   <model name="red_bin">
-    <static>true</static>
+    <static>false</static>
     <!-- spawn位置，训练时会被随机传送 -->
     <pose>0.35 -0.15 0.06 0 0 0</pose>
 
@@ -181,7 +181,7 @@
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
 
     <!-- 前壁 (x+方向) -->
@@ -223,13 +223,13 @@
 
   <!-- ─────────── GREEN BIN ─────────── -->
   <model name="green_bin">
-    <static>true</static>
+    <static>false</static>
     <pose>0.35 0.00 0.06 0 0 0</pose>
     <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
     <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
@@ -259,13 +259,13 @@
 
   <!-- ─────────── BLUE BIN ─────────── -->
   <model name="blue_bin">
-    <static>true</static>
+    <static>false</static>
     <pose>0.35 0.15 0.06 0 0 0</pose>
     <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
     <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
@@ -295,13 +295,13 @@
 
   <!-- ─────────── YELLOW BIN ─────────── -->
   <model name="yellow_bin">
-    <static>true</static>
+    <static>false</static>
     <pose>0.38 -0.08 0.06 0 0 0</pose>
     <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
     <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
@@ -331,13 +331,13 @@
 
   <!-- ─────────── PINK BIN ─────────── -->
   <model name="pink_bin">
-    <static>true</static>
+    <static>false</static>
     <pose>0.38 0.08 0.06 0 0 0</pose>
     <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
     <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>
@@ -367,13 +367,13 @@
 
   <!-- ─────────── ORANGE BIN ─────────── -->
   <model name="orange_bin">
-    <static>true</static>
+    <static>false</static>
     <pose>0.36 -0.14 0.06 0 0 0</pose>
     <link name="bottom"><pose>0 0 -0.05875 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry>
         <material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material>
       </visual>
-      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry></collision>
+      <collision name="c"><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface></collision>
     </link>
     <link name="wall_f"><pose>0.03375 0 0 0 0 0</pose>
       <visual name="v"><geometry><box><size>0.0025 0.07 0.12</size></box></geometry>

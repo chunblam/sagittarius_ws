@@ -43,6 +43,7 @@ from std_srvs.srv import Empty
 
 import moveit_commander
 from geometry_msgs.msg import PoseStamped
+from moveit_commander import PlanningSceneInterface
 
 from config.color_config import ColorConfig, get_color_config
 
@@ -210,6 +211,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._bridge          = None
         self._delete_model_srv = None
         self._spawn_model_srv  = None
+        self._planning_scene   = None
 
         # 当前episode中物体位置缓存（含噪声）
         self._block_positions: dict = {}   # color → np.array([x,y])
@@ -244,6 +246,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.allow_replanning(True)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
+        self._planning_scene = PlanningSceneInterface()
+        rospy.sleep(1.0)
 
         rospy.Subscriber("/gazebo/model_states", ModelStates,
                          self._model_cb, queue_size=1)
@@ -285,6 +289,55 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._ros_initialized = True
         rospy.loginfo("[Env] ROS初始化完成。支持颜色: %s",
                       self.color_cfg.colors)
+
+    def _sync_moveit_planning_scene(self):
+        """
+        将当前激活物体同步到 MoveIt PlanningScene：
+        - 清理上轮对象（6色方块+桶）
+        - 添加桌面碰撞体
+        - 仅添加本轮激活的 3 方块 + 3 桶（位姿来自 Gazebo model_states）
+        """
+        if self._planning_scene is None:
+            return
+
+        # 清理旧对象
+        try:
+            for c in WORLD_SPAWN_COLORS:
+                self._planning_scene.remove_world_object(block_name(c))
+                self._planning_scene.remove_world_object(bin_name(c))
+            self._planning_scene.remove_world_object("workspace_table")
+        except Exception:
+            pass
+
+        # 添加桌子（与 world 一致）
+        table_pose = PoseStamped()
+        table_pose.header.frame_id = "world"
+        table_pose.pose.position.x = 0.28
+        table_pose.pose.position.y = 0.0
+        table_pose.pose.position.z = -0.025
+        table_pose.pose.orientation.w = 1.0
+        self._planning_scene.add_box("workspace_table", table_pose, (0.70, 0.70, 0.05))
+
+        # 激活方块 / 桶
+        for c in self._active_colors:
+            bxyz = self._get_pose(block_name(c))
+            p = PoseStamped()
+            p.header.frame_id = "world"
+            p.pose.position.x = float(bxyz[0])
+            p.pose.position.y = float(bxyz[1])
+            p.pose.position.z = float(bxyz[2])
+            p.pose.orientation.w = 1.0
+            self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.04))
+
+            zyz = self._get_pose(bin_name(c))
+            q = PoseStamped()
+            q.header.frame_id = "world"
+            q.pose.position.x = float(zyz[0])
+            q.pose.position.y = float(zyz[1])
+            q.pose.position.z = float(zyz[2])
+            q.pose.orientation.w = 1.0
+            # 简化为空桶外包络盒，供 MoveIt 避障
+            self._planning_scene.add_box(bin_name(c), q, (0.07, 0.07, 0.12))
 
     def _model_cb(self, msg):
         self._model_states = msg
@@ -369,26 +422,23 @@ class SagittariusPickPlaceEnv(gym.Env):
         激活但缺失（上轮被删）：从 pick_place_scene.world 提取 SDF 并 spawn。
         若 Gazebo 服务不可用，回退为远端 _teleport 停放（与旧版兼容）。
         """
-        active_set = set(self._active_colors)
-        park_x = 2.0
-        park_i = 0
-
-        # ── 删除未激活 ────────────────────────────────────────────────────
-        for c in WORLD_SPAWN_COLORS:
-            if c in active_set:
-                continue
-            for nm, zc in ((block_name(c), BLOCK_H / 2.0),
-                           (bin_name(c), BIN_H / 2.0)):
-                if not self._model_in_world(nm):
-                    continue
-                if self._delete_model_srv is not None:
-                    self._delete_model_safe(nm)
-                else:
-                    py = park_i * 0.2
-                    self._teleport(nm, park_x, py, zc)
+        # ── 每轮先清空所有颜色模型，再只生成本轮激活 3+3 ───────────────────
+        if self._delete_model_srv is not None:
+            for c in WORLD_SPAWN_COLORS:
+                self._delete_model_safe(block_name(c))
+                self._delete_model_safe(bin_name(c))
+            # 等待一次 model_states 刷新，避免后续“刚删完又判定存在”
+            rospy.sleep(0.1)
+        else:
+            # 无删除服务时回退到远端停放
+            park_i = 0
+            for c in WORLD_SPAWN_COLORS:
+                for nm, zc in ((block_name(c), BLOCK_H / 2.0),
+                               (bin_name(c), BIN_H / 2.0)):
+                    self._teleport(nm, SPAWN_PARK_X, SPAWN_PARK_Y0 + park_i * 0.2, zc)
                     park_i += 1
 
-        # ── 为激活颜色补齐模型 ───────────────────────────────────────────
+        # ── 仅为激活颜色补齐模型 ──────────────────────────────────────────
         spawn_k = 0
         for c in self._active_colors:
             for nm, zc in ((block_name(c), BLOCK_H / 2.0),
@@ -487,6 +537,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         self._sync_gazebo_models_delete_or_spawn()
         self._place_active_objects_unified(rng)
+        # 让 MoveIt 仅看到本轮激活物体，且位姿与 Gazebo 一致
+        self._sync_moveit_planning_scene()
 
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
@@ -615,6 +667,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         target.pose.position.y = y
         target.pose.position.z = z
         target.pose.orientation.w = 1.0
+        # 规划前同步一次场景，避免使用过期障碍位姿
+        self._sync_moveit_planning_scene()
         self._moveit_arm.set_start_state_to_current_state()
         self._moveit_arm.set_pose_target(
             target, self._moveit_arm.get_end_effector_link())
@@ -629,6 +683,30 @@ class SagittariusPickPlaceEnv(gym.Env):
         except Exception as e:
             rospy.logwarn(f"[Env] execute 失败: {e}")
             return False
+
+    def _attach_held_block_to_scene(self, color: str):
+        if self._planning_scene is None or self._moveit_arm is None:
+            return
+        try:
+            ee = self._moveit_arm.get_end_effector_link()
+            p = PoseStamped()
+            p.header.frame_id = ee
+            p.pose.position.x = 0.0
+            p.pose.position.y = 0.0
+            p.pose.position.z = 0.0
+            p.pose.orientation.w = 1.0
+            self._planning_scene.attach_box(ee, block_name(color), p, (0.05, 0.05, 0.04))
+        except Exception as e:
+            rospy.logwarn(f"[Env] attach_box 失败 {color}: {e}")
+
+    def _detach_held_block_from_scene(self, color: str):
+        if self._planning_scene is None or self._moveit_arm is None:
+            return
+        try:
+            ee = self._moveit_arm.get_end_effector_link()
+            self._planning_scene.remove_attached_object(ee, block_name(color))
+        except Exception as e:
+            rospy.logwarn(f"[Env] detach_box 失败 {color}: {e}")
 
     def _execute_pick(self, x: float, y: float, color: str) -> bool:
         """
@@ -669,12 +747,16 @@ class SagittariusPickPlaceEnv(gym.Env):
             return False
 
         self._holding_color = color
+        self._attach_held_block_to_scene(color)
         return True
 
     def _execute_place(self, x: float, y: float) -> bool:
+        held = self._holding_color
         if not self._move_to_xy(x, y, TABLE_Z + APPROACH_H): return False
         if not self._move_to_xy(x, y, TABLE_Z + PLACE_H):    return False
         self._open_gripper()
+        if held:
+            self._detach_held_block_from_scene(held)
         self._holding_color = None
         self._move_to_xy(x, y, TABLE_Z + APPROACH_H)
         return True
@@ -820,11 +902,20 @@ class SagittariusPickPlaceEnv(gym.Env):
             color   = self._active_colors[obj_idx - self.N]
             base_xy = self._get_bin_pos(color)
 
-        target_xy = np.clip(
-            base_xy + res_xy,
-            [OBJECT_ZONE_X[0], OBJECT_ZONE_Y[0]],
-            [OBJECT_ZONE_X[1], OBJECT_ZONE_Y[1]],
-        )
+        # 放置动作默认对准桶中心，保持“桶中心上方垂直下放”；
+        # pick 才使用 residual 做微调搜索。
+        if primitive == 1:
+            target_xy = np.clip(
+                base_xy,
+                [OBJECT_ZONE_X[0], OBJECT_ZONE_Y[0]],
+                [OBJECT_ZONE_X[1], OBJECT_ZONE_Y[1]],
+            )
+        else:
+            target_xy = np.clip(
+                base_xy + res_xy,
+                [OBJECT_ZONE_X[0], OBJECT_ZONE_Y[0]],
+                [OBJECT_ZONE_X[1], OBJECT_ZONE_Y[1]],
+            )
 
         # 执行动作原语
         if primitive == 0:
