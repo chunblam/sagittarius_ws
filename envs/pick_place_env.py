@@ -77,6 +77,12 @@ OBJECT_ZONE_X = (0.12, 0.56)
 OBJECT_ZONE_Y = (-0.28, 0.28)
 MIN_OBJECT_CENTER_GAP = 0.12
 
+# 可达性约束（基于当前台面与机械臂安装关系的保守圆域）
+ARM_BASE_X = 0.28
+ARM_BASE_Y = 0.0
+ARM_REACH_MIN_R = 0.10
+ARM_REACH_MAX_R = 0.35
+
 # 首次 spawn 临时落点（远离桌面，避免与桌台重叠）
 SPAWN_PARK_X = 2.0
 SPAWN_PARK_Y0 = 0.0
@@ -498,11 +504,29 @@ class SagittariusPickPlaceEnv(gym.Env):
             for col in range(cols):
                 cx = zone_x[0] + gap * (col + 0.5)
                 cy = zone_y[0] + gap * (row + 0.5)
-                if cx <= zone_x[1] and cy <= zone_y[1]:
+                if (
+                    cx <= zone_x[1]
+                    and cy <= zone_y[1]
+                    and self._is_reachable_xy(cx, cy)
+                ):
                     pts.append((cx, cy))
                 if len(pts) >= n:
                     return pts
         return pts[:n]
+
+    def _is_reachable_xy(self, x: float, y: float) -> bool:
+        r = float(np.hypot(x - ARM_BASE_X, y - ARM_BASE_Y))
+        return (ARM_REACH_MIN_R <= r <= ARM_REACH_MAX_R)
+
+    def _project_to_reachable_xy(self, x: float, y: float) -> np.ndarray:
+        dx = float(x - ARM_BASE_X)
+        dy = float(y - ARM_BASE_Y)
+        r = float(np.hypot(dx, dy))
+        if r < 1e-9:
+            return np.array([ARM_BASE_X + ARM_REACH_MIN_R, ARM_BASE_Y], dtype=np.float32)
+        rr = min(max(r, ARM_REACH_MIN_R), ARM_REACH_MAX_R)
+        s = rr / r
+        return np.array([ARM_BASE_X + dx * s, ARM_BASE_Y + dy * s], dtype=np.float32)
 
     def _place_active_objects_unified(self, rng: np.random.Generator) -> None:
         """在 OBJECT_ZONE 内为 3 方块 + 3 桶采样位置，两两中心距 ≥ MIN_OBJECT_CENTER_GAP。"""
@@ -517,6 +541,8 @@ class SagittariusPickPlaceEnv(gym.Env):
             for _ in range(280):
                 x = float(rng.uniform(*OBJECT_ZONE_X))
                 y = float(rng.uniform(*OBJECT_ZONE_Y))
+                if not self._is_reachable_xy(x, y):
+                    continue
                 if all(
                     np.hypot(x - px, y - py) >= MIN_OBJECT_CENTER_GAP
                     for px, py in placed_xy
@@ -974,6 +1000,10 @@ class SagittariusPickPlaceEnv(gym.Env):
                 [OBJECT_ZONE_X[0], OBJECT_ZONE_Y[0]],
                 [OBJECT_ZONE_X[1], OBJECT_ZONE_Y[1]],
             )
+        # 双保险：动作目标若越出可达域，投影回可达边界
+        if not self._is_reachable_xy(float(target_xy[0]), float(target_xy[1])):
+            target_xy = self._project_to_reachable_xy(
+                float(target_xy[0]), float(target_xy[1]))
 
         # 执行动作原语
         if primitive == 0:

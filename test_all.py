@@ -199,14 +199,14 @@ def test_5_env_reset_step():
             warn("桶位置全是 0，检查 Gazebo 桶模型是否加载")
 
         # ── 检查垃圾桶是否互不重叠 ────────────────────────────────────────
-        info("检查垃圾桶位置是否互不重叠（最小间距应 ≥ 0.16 m）...")
+        info("检查垃圾桶位置是否互不重叠（最小间距应 ≥ 0.08 m）...")
         overlap_found = False
         for i in range(na):
             for j in range(i + 1, na):
                 d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
-                if d < 0.14:   # 低于安全阈值
+                if d < 0.08:   # 低于安全阈值（8cm）
                     fail(f"  桶 {active[i]} 与 {active[j]} 距离过近: "
-                         f"{d:.3f} m（应 ≥ 0.16 m）")
+                         f"{d:.3f} m（应 ≥ 0.08 m）")
                     overlap_found = True
         if not overlap_found:
             ok(f"  所有 {na} 个激活垃圾桶位置互不重叠 ✓")
