@@ -49,7 +49,7 @@ sagittarius_ws/
 | 颜色编码方式 | 3维one-hot（固定大小） | N维Embedding index（颜色数变化无需改网络） |
 | 方块/桶区分 | 分开处理 | 同一HSV检测，面积阈值自动区分 |
 | 观测向量 | crops + block_pos + gripper + lang | crops + block_pos + **bin_pos** + gripper + task |
-| 动作原语 | （历史）分步 pick / place | **单次 `pick_and_place`**：一步 `env.step` 内由 **`_execute_pick_and_place`** 连续执行（移动到方块→抓取→抬起→**同一函数内**过渡到桶上方→放置），**不是**先调 `_execute_pick` 再调 `_execute_place` 两次高层入口；向桶运动前会 **`set_start_state_to_current_state()`** 以持块姿态延续规划。**动作维度 7** = `[pick_block_idx, place_bin_idx, pose_id, rpx, rpy, rbx, rby]`；子阶段间隔 **`INTER_ROBOT_STAGE_PAUSE_S=0.5s`**。旧 checkpoint **不兼容**，需重新训练。 |
+| 动作原语 | （历史）分步 pick / place | **单次 `pick_and_place`**：一步 `env.step` 内由 **`_execute_pick_and_place`** 连续执行（接近方块→抓取 **middle**→垂直抬至 **`APPROACH_H`（0.27m）**→同高度平移至桶上方→**开爪**；不在 MoveIt 中 **attach** 方块，搬运段用 **`ignore_block_color`** 省略桌面方块碰撞体；开爪后经 **`PLACE_DROP_SETTLE_S`** 再 **`_check_done()`**）。向桶运动前会 **`set_start_state_to_current_state()`**。**动作维度 7** = `[pick_block_idx, place_bin_idx, pose_id, rpx, rpy, rbx, rby]`；子阶段间隔 **`INTER_ROBOT_STAGE_PAUSE_S=0.5s`**。旧 checkpoint **不兼容**，需重新训练。 |
 
 **长任务（多步全配对）与 SH 策略如何组合**：见 **[`docs/SH_PLANNING.md`](docs/SH_PLANNING.md)**（规划层方案，当前未在代码中实现）。
 

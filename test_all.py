@@ -171,15 +171,9 @@ def _test5_pause(interactive: bool, msg: str) -> None:
 
 def _test5_release_arm_after_pick(env):
     """
-    B 段「错误 pick_block」测试前：若上一步 pick_and_place 已持块（middle + attach）或
-    抓取成功但未入桶，直接再 env.step 会碰撞。去附着、开爪并回 home，恢复无持块状态。
+    B 段「错误 pick_block」测试前：若上一步 pick_and_place 已持块（middle，无 PlanningScene attach）
+    或抓取成功但未入桶，直接再 env.step 可能碰撞。开爪并回 home，恢复无持块状态。
     """
-    held = getattr(env, "_holding_color", None)
-    if held:
-        try:
-            env._detach_held_block_from_scene(held)
-        except Exception:
-            pass
     env._holding_color = None
     try:
         env._open_gripper()
@@ -197,7 +191,8 @@ def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
     """
     与 pick_place_env._execute_pick_and_place 内部运动分解等价的理想分阶段流程
     （单一 pick_and_place 原语；内含 INTER_ROBOT_STAGE_PAUSE_S 间隔）：
-    开爪 → 方块上方 → 预降 → 抓取高度 → 夹持 → 抬起验证 → 桶上方 → 下放 → 开爪释放 → 抬离
+    开爪 → 方块上方 → 预降 → 抓取高度 → 夹持(middle) → 垂直抬至 APPROACH_H → 同高平移至桶上方
+    → 开爪释放 → 等待 PLACE_DROP_SETTLE_S（不 attach / 不下放到 PLACE_H）
     使用 Gazebo GT；每步前可暂停观察。
 
     调用方应在进入 D 段前已执行 env.reset()（Test5 在 B 段结束后会 reset）。
@@ -216,7 +211,7 @@ def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
     gx, gy = env._grasp_tcp_xy_from_block_center(bx, by)
     yaw = math.atan2(gy - ppe_mod.ARM_BASE_Y, gx - ppe_mod.ARM_BASE_X)
     pre_z = tz + ppe_mod.BLOCK_H + ppe_mod.PRE_GRASP_CLEAR_Z
-    lift_verify_z = tz + ppe_mod.BIN_H + 0.02
+    lift_verify_z = float(ppe_mod.PICK_LIFT_VERIFY_Z)
 
     def _m(label: str, fn) -> bool:
         _test5_pause(interactive, label)
@@ -281,41 +276,27 @@ def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
         env._holding_color = None
         return False
     env._holding_color = pick_c
-    env._attach_held_block_to_scene(pick_c)
-    ok(f"  D-7 抓取验证通过 (z={block_z:.4f})，已 attach 至规划场景")
+    ok(f"  D-7 抓取验证通过 (z={block_z:.4f})，持块（middle，无 attach）")
 
     bin_xyz = env._get_pose(ppe_mod.bin_name(place_c))
     px, py = float(bin_xyz[0]), float(bin_xyz[1])
     yaw_p = math.atan2(py - ppe_mod.ARM_BASE_Y, px - ppe_mod.ARM_BASE_X)
 
     if not _m(
-        f"D-8 移至目标桶上方安全高度 z={tz + ppe_mod.APPROACH_H:.3f}",
+        f"D-8 移至目标桶上方同安全高度 z={tz + ppe_mod.APPROACH_H:.3f}",
         lambda: env._move_to_xy(
             px, py, tz + ppe_mod.APPROACH_H, yaw_p, orientation_mode="horizontal",
-        ),
-    ):
-        return False
-    if not _m(
-        f"D-9 下放至桶口放置高度 z={tz + ppe_mod.PLACE_H:.3f}",
-        lambda: env._move_to_xy(
-            px, py, tz + ppe_mod.PLACE_H, yaw_p, orientation_mode="horizontal",
+            ignore_block_color=pick_c,
         ),
     ):
         return False
 
-    _test5_pause(interactive, "D-10 开爪释放方块")
+    _test5_pause(interactive, "D-9 桶口上方开爪释放（与 env 原语一致）")
     env._open_gripper()
-    held = env._holding_color
-    if held:
-        env._detach_held_block_from_scene(held)
     env._holding_color = None
-    ok("  D-10 开爪并已 detach")
-
-    _test5_pause(interactive, "D-11 抬离桶口（回到安全高度）")
-    env._move_to_xy(
-        px, py, tz + ppe_mod.APPROACH_H, yaw_p, orientation_mode="horizontal",
-    )
-    ok("  D 段分阶段流程结束")
+    ok("  D-9 已开爪")
+    time.sleep(float(getattr(ppe_mod, "PLACE_DROP_SETTLE_S", 1.0)))
+    ok(f"  D 段结束（已等待 {getattr(ppe_mod, 'PLACE_DROP_SETTLE_S', 1.0)}s 供方块落入桶）")
     return True
 
 
