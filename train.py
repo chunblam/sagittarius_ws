@@ -75,6 +75,11 @@ def get_args():
     p.add_argument("--calib-yaml",         type=str,   default=None,
                    help="Lab2 标定 yaml（真机评估用）")
 
+    # 训练课程：2+2（先训） / 3+2（方块多于桶，含干扰色）
+    p.add_argument(
+        "--curriculum", type=str, default="2+2", choices=["2+2", "3+2"],
+        help="2+2=2方块2桶；3+2=3方块2桶（少一个桶，含干扰块）")
+
     # 实验
     p.add_argument("--ablation",           action="store_true")
     p.add_argument("--seeds",              type=int, nargs="+", default=[0,1,2])
@@ -124,20 +129,23 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
     train_env = Monitor(
         SagittariusPickPlaceEnv(
             task=args.task, max_steps=args.max_episode_steps,
-            color_config=color_cfg, pose_id_count=args.pose_id_count),
+            color_config=color_cfg, pose_id_count=args.pose_id_count,
+            curriculum_mode=args.curriculum),
         filename=str(log_dir / "train_monitor.csv"))
 
     eval_env = Monitor(
         SagittariusPickPlaceEnv(
             task=args.task, max_steps=args.max_episode_steps,
             color_config=color_cfg, noise_sigma=0.0,
-            pose_id_count=args.pose_id_count),
+            pose_id_count=args.pose_id_count,
+            curriculum_mode=args.curriculum),
         filename=str(log_dir / "eval_monitor.csv"))
 
-    # 网络与动作空间维度 = 每回合激活颜色数 n_active（非 color_cfg.n_colors）
+    # 网络与动作空间维度 = 固定槽位 n_active=SLOT_COUNT（3），与课程 2+2 / 3+2 无关
     na = train_env.env.n_active
     print(f"[Train] 颜色配置: {color_cfg.colors}  (ColorConfig N={color_cfg.n_colors})")
-    print(f"[Train] 观测/策略维度 n_active={na}  obs_dim={train_env.env.obs_dim}")
+    print(f"[Train] 课程 curriculum={args.curriculum}  "
+          f"观测/策略槽位 n_active={na}  obs_dim={train_env.env.obs_dim}")
 
     # LLM 探索策略（文字接口，训练阶段使用）
     # 密钥可从环境变量 LLM_API_KEY 读取，无需在命令行传 --api-key
@@ -221,6 +229,7 @@ def train_single(args, epsilon: float, seed: int, run_name: str):
         "calib_yaml":  args.calib_yaml,
         "colors":      color_cfg.colors,
         "n_active":    na,
+        "curriculum":  args.curriculum,
     }
     with open(log_dir/"vlm_config.json","w") as f:
         json.dump(vlm_config, f, indent=2)

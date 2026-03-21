@@ -17,6 +17,7 @@
     6. 桶声明为 static=false，可与方块一样参与随机位置与物理碰撞
     7. 命名约定：{color}_block / {color}_bin
     8. 本文件只包含物体模型，不含 ground/sun/physics 配置
+  9. 质量：方块约 40g、空桶约 220g（略重于早期 12g/160g，减轻 ODE 接触下数值抖动）
 
   如何使用：
     把本文件里所有 <model> 标签复制进你现有的 world 文件的 <world> 标签内。
@@ -58,9 +59,9 @@
     <pose>0.18 -0.12 0.021 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.012</mass>
-        <inertia><ixx>1.4e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>1.4e-5</iyy><iyz>0</iyz><izz>2.1e-5</izz></inertia>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
       </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
@@ -76,7 +77,11 @@
   <model name="green_block">
     <pose>0.22 -0.04 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.012</mass></inertial>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+      </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.10 0.80 0.15 1</ambient><diffuse>0.10 0.80 0.15 1</diffuse></material>
@@ -91,7 +96,11 @@
   <model name="blue_block">
     <pose>0.18 0.06 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.012</mass></inertial>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+      </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.10 0.20 0.90 1</ambient><diffuse>0.10 0.20 0.90 1</diffuse></material>
@@ -106,7 +115,11 @@
   <model name="yellow_block">
     <pose>0.24 0.14 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.012</mass></inertial>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+      </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.90 0.05 1</ambient><diffuse>0.95 0.90 0.05 1</diffuse></material>
@@ -121,7 +134,11 @@
   <model name="pink_block">
     <pose>0.20 -0.16 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.012</mass></inertial>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+      </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.40 0.70 1</ambient><diffuse>0.95 0.40 0.70 1</diffuse></material>
@@ -136,7 +153,11 @@
   <model name="orange_block">
     <pose>0.26 0.00 0.021 0 0 0</pose>
     <link name="link">
-      <inertial><mass>0.012</mass></inertial>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+      </inertial>
       <visual name="v">
         <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
         <material><ambient>0.95 0.50 0.05 1</ambient><diffuse>0.95 0.50 0.05 1</diffuse></material>
@@ -169,8 +190,8 @@
     <pose>0.35 -0.15 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.85 0.08 0.08 1</ambient><diffuse>0.85 0.08 0.08 1</diffuse></material></visual>
@@ -192,8 +213,8 @@
     <pose>0.35 0.00 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.75 0.12 1</ambient><diffuse>0.08 0.75 0.12 1</diffuse></material></visual>
@@ -215,8 +236,8 @@
     <pose>0.35 0.15 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.08 0.15 0.85 1</ambient><diffuse>0.08 0.15 0.85 1</diffuse></material></visual>
@@ -238,8 +259,8 @@
     <pose>0.38 -0.08 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.88 0.05 1</ambient><diffuse>0.92 0.88 0.05 1</diffuse></material></visual>
@@ -261,8 +282,8 @@
     <pose>0.38 0.08 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.38 0.68 1</ambient><diffuse>0.92 0.38 0.68 1</diffuse></material></visual>
@@ -284,8 +305,8 @@
     <pose>0.36 -0.14 0.06 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.16</mass>
-        <inertia><ixx>1.8e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.8e-4</iyy><iyz>0</iyz><izz>2.6e-4</izz></inertia>
+        <mass>0.22</mass>
+        <inertia><ixx>2.48e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.48e-4</iyy><iyz>0</iyz><izz>3.58e-4</izz></inertia>
       </inertial>
       <visual name="bottom_v"><pose>0 0 -0.05875 0 0 0</pose><geometry><box><size>0.07 0.07 0.0025</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>
       <visual name="wall_f_v"><pose>0.03375 0 0 0 0 0</pose><geometry><box><size>0.0025 0.07 0.12</size></box></geometry><material><ambient>0.92 0.48 0.05 1</ambient><diffuse>0.92 0.48 0.05 1</diffuse></material></visual>

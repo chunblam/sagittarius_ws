@@ -417,19 +417,26 @@ class LLMExplorationPolicy:
         """完整LLM探索：πH → πL → ã_t"""
         primitive, obj_idx = self.call_high_level(obs_dict)
 
-        active = list(obs_dict.get("active_colors") or [])
-        if not active:
-            active = list(self.color_cfg.colors[: self.n_active])
-        N = len(active)
-        N = max(N, 1)
-        obj_idx = int(np.clip(obj_idx, 0, 2 * N - 1))
-        if obj_idx < N:
-            obj_name = f"{active[obj_idx]}_block"
+        bc = list(obs_dict.get("active_block_colors") or [])
+        bn = list(obs_dict.get("active_bin_colors") or [])
+        if not bc or not bn:
+            active = list(obs_dict.get("active_colors") or [])
+            if not active:
+                active = list(self.color_cfg.colors[: self.n_active])
+            bc = active
+            bn = active
+        nb = int(obs_dict.get("n_blocks") or len(bc))
+        nbin = int(obs_dict.get("n_bins") or len(bn))
+        max_obj = max(0, nb + nbin - 1)
+        obj_idx = int(np.clip(obj_idx, 0, max_obj))
+        if obj_idx < nb:
+            obj_name = f"{bc[obj_idx]}_block"
         else:
-            obj_name = f"{active[obj_idx - N]}_bin"
+            obj_name = f"{bn[obj_idx - nb]}_bin"
 
-        # 取对应的图像 crop（与 obs 中激活颜色顺序一致）
-        crop_idx = min(obj_idx % N, len(crops) - 1)
+        slot_n = int(self.n_active)
+        # 取对应的图像 crop（方块槽位与 obs 一致；对桶动作用目标方块 crop 近似）
+        crop_idx = min(obj_idx if obj_idx < slot_n else 0, len(crops) - 1)
         if 0 <= crop_idx < len(crops):
             chw  = crops[crop_idx]
             hwc  = (chw.transpose(1, 2, 0) * 255).astype(np.uint8)

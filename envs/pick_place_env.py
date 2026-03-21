@@ -5,27 +5,34 @@ pick_place_env.py
 ====================
 升级版环境，相比原版的核心变化：
 
-  变化1：支持任意多种颜色（从color_config动态读取，不再写死3种）
-  变化2：垃圾桶/方块位置随机（每次 episode 在桌面中央作业矩形内随机，见 OBJECT_ZONE_*）
-  变化3：observation向量用颜色index代替one-hot（支持任意颜色数）
-  变化4：observation包含桶的位置（因为桶不再固定，必须告诉policy桶在哪）
+  变化1：支持任意多种颜色（从 color_config 动态读取）
+  变化2：垃圾桶/方块位置在 OBJECT_ZONE_* 内随机（贴近机械臂基座前方「前景区」，避免落在桌面最远端）
+  变化3：observation 向量用任务颜色 index（固定槽位数）
+  变化4：observation 包含桶的位置（桶每回合随机）
 
-Observation向量新布局（N = n_active，每回合从 color_cfg 随机抽 ACTIVE_COLORS_PER_EPISODE 种）：
+训练课程 curriculum_mode：
+  - "2+2"：2 个方块 + 2 个桶（颜色子集独立打乱），任务从方块集合与桶集合中各抽一个颜色。
+  - "3+2"：3 个方块 + 2 个桶（桶颜色为方块颜色的二元子集），多 1 个无对应桶的干扰方块。
+
+Observation 向量（SLOT_COUNT=3 固定，与策略网络维度一致；未满槽位填零）：
   [img_patches | block_positions | bin_positions | gripper | task_encoding]
-   N*3*28*28      N*2              N*2             1         2
+   3*3*28*28      3*2             3*2             1         2
 
-  task_encoding = [pick_local_idx, place_local_idx]，在 _active_colors 中的下标 0..N-1。
+  task_encoding = [pick_local_idx, place_local_idx]
+    pick_local  ∈ 0..n_blocks_ep-1（本回合 _active_block_colors）
+    place_local ∈ 0..n_bins_ep-1（本回合 _active_bin_colors）
 
 Action向量：
-  [primitive(0-1), obj_index(0-2*N-1), pose_id(0..K-1), res_x, res_y]
-  前 N 个 = 激活颜色方块，后 N 个 = 激活颜色垃圾桶（顺序与 _active_colors 一致）。
+  [primitive(0-1), obj_index(0..n_blocks+n_bins-1), pose_id(0..K-1), res_x, res_y]
+  前 n_blocks 个 index = 方块（_active_block_colors 顺序），后 n_bins 个 = 桶（_active_bin_colors 顺序）。
 """
 
 import os
 import sys
 import time
 import math
-from typing import Tuple
+import itertools
+from typing import Tuple, List
 
 import numpy as np
 import gymnasium as gym
@@ -56,13 +63,10 @@ except ImportError:
 
 # ── 场景参数 ──────────────────────────────────────────────────────────────────
 
-# 每个 episode 实际激活的颜色数量
-# 从全部颜色中随机选取这么多种，同时出现在桌面上
-# 设为 3 的理由：
-#   - 3 个桶在扩大后的区域里轻松不重叠（间距充足）
-#   - 减少 observation 中无用颜色槽位的噪声
-#   - 训练收敛更快，泛化性不受影响（每次颜色随机不同）
-ACTIVE_COLORS_PER_EPISODE = 3
+# 策略网络 / 观测向量使用的固定槽位数（与 ExploRLLMSAC 的 n_colors=3 一致）
+SLOT_COUNT = 3
+# 兼容旧脚本名：等同于 SLOT_COUNT
+ACTIVE_COLORS_PER_EPISODE = SLOT_COUNT
 DEFAULT_POSE_ID_COUNT = 1
 
 # 与 pick_place_scene.world 中声明的 {color}_block / {color}_bin 一致。
@@ -71,16 +75,16 @@ DEFAULT_POSE_ID_COUNT = 1
 # 个模型会永远留在桌上。
 WORLD_SPAWN_COLORS = ("red", "green", "blue", "yellow", "pink", "orange")
 
-# 激活物体（3 方块 + 3 桶）随机区域：桌面中央「作业矩形」
-# 实物参考（与图中黑框一致）：一排 3 个桶（底约 6.5cm 见方）+ 下方/侧向一块前景矩形（约 20cm 宽 × 12–15cm 深）；
-# 桶行与前景区均在机械臂可达范围内，仿真里在略扩大的矩形内统一随机，避免整桌乱跑。
-# 世界系：桌面中心约 (0.28,0)；矩形须落在 ARM_* 可达环 [ARM_REACH_MIN_R, ARM_REACH_MAX_R] 内，
-# 角点已校验，避免「基座近圆心」或「伸臂过远」导致规划无解。
-# 当前约：x 方向 ~13.5cm、y 方向 ~28cm（在环与桌面允许范围内尽量与实物前景区对齐并略放宽）。
-OBJECT_ZONE_X = (0.44, 0.575)
-OBJECT_ZONE_Y = (-0.14, 0.14)
-# 6 个物体：间距略小于 12cm，否则小矩形内难以采样；仍保证物体可区分
-MIN_OBJECT_CENTER_GAP = 0.085
+# 激活物体随机区域：桌面「前景区」——相对旧版明显左移（避免物体落在桌面最右侧远端），
+# 与实物黑框矩形对齐：在机械臂可达环内、靠近基座前方，便于 IK / MoveIt 求解。
+# 世界系：桌面中心约 (0.28,0)；矩形落在 [ARM_REACH_MIN_R, ARM_REACH_MAX_R] 环域内。
+OBJECT_ZONE_X = (0.38, 0.53)
+OBJECT_ZONE_Y = (-0.18, 0.18)
+# 物体中心之间最小距离（米）；与实物「至少 10cm」一致，减少拥挤导致的规划失败
+MIN_OBJECT_CENTER_GAP = 0.10
+# 网格落位时在 x/y 上的一次性随机偏移（米），仅在 reset 传送时加一次，**不是**物理引擎每帧抖动。
+# 默认 ±5mm：略打破完全规则的网格对齐；设为 0 则与「摆好后位置固定」一致。
+OBJECT_PLACE_JITTER = 0.005
 
 # 可达性约束（基于当前台面与机械臂安装关系的保守圆域）
 ARM_BASE_X = 0.28
@@ -160,7 +164,8 @@ class SagittariusPickPlaceEnv(gym.Env):
                  noise_sigma: float = POSITION_NOISE_SIGMA,
                  color_config: ColorConfig = None,
                  yaml_path: str = None,
-                 pose_id_count: int = DEFAULT_POSE_ID_COUNT):
+                 pose_id_count: int = DEFAULT_POSE_ID_COUNT,
+                 curriculum_mode: str = "2+2"):
 
         super().__init__()
         self.task        = task
@@ -168,30 +173,46 @@ class SagittariusPickPlaceEnv(gym.Env):
         self.noise_sigma = noise_sigma
         self.color_cfg   = color_config or get_color_config(yaml_path)
 
-        # 每个 episode 激活的颜色数（从全部颜色中随机抽取）
-        # N_active <= color_cfg.n_colors
-        self.n_active = min(ACTIVE_COLORS_PER_EPISODE,
-                            self.color_cfg.n_colors)
+        cm = str(curriculum_mode).strip().lower().replace("-", "+")
+        if cm not in ("2+2", "3+2"):
+            raise ValueError(
+                f"curriculum_mode 必须是 '2+2' 或 '3+2'，收到: {curriculum_mode!r}")
+        self.curriculum_mode = cm
+        if cm == "2+2":
+            self.n_blocks_ep = 2
+            self.n_bins_ep = 2
+        else:
+            self.n_blocks_ep = 3
+            self.n_bins_ep = 2
+        if self.color_cfg.n_colors < self.n_blocks_ep:
+            raise ValueError(
+                f"课程 {cm} 需要至少 {self.n_blocks_ep} 种颜色，"
+                f"当前 color_cfg 仅 {self.color_cfg.n_colors} 种")
+
         self.pose_id_count = max(1, int(pose_id_count))
         self.pose_yaw_candidates = np.linspace(
             -math.pi / 2.0, math.pi / 2.0, self.pose_id_count
         ).astype(np.float32)
-        # 当前 episode 激活的颜色子集（每次 reset 重新抽取）
-        self._active_colors: list = self.color_cfg.colors[:self.n_active]
+        # 本回合方块 / 桶颜色列表（不等长；3+2 时 len(block_colors)>len(bin_colors)）
+        self._active_block_colors: List[str] = []
+        self._active_bin_colors: List[str] = []
 
-        N = self.n_active   # observation/action 维度基于激活数量
+        # 固定槽位数（与 SAC / ObjectCentricExtractor 一致）
+        N = SLOT_COUNT
+        self.n_active = N
+        self.N = N
 
-        # 当前episode的任务颜色
-        self.pick_color:  str = self._active_colors[0]
-        self.place_color: str = self._active_colors[1]
+        # 当前 episode 的任务颜色
+        self.pick_color:  str = ""
+        self.place_color: str = ""
         self._step_count   = 0
         self._gripper_open = True
         self._holding_color: str = None
 
         # ── 观测空间 ──────────────────────────────────────────────────────
-        # img: n_active * 3 * 28 * 28
-        # block_positions: n_active * 2
-        # bin_positions:   n_active * 2
+        # img: SLOT_COUNT * 3 * 28 * 28
+        # block_positions: SLOT_COUNT * 2
+        # bin_positions:   SLOT_COUNT * 2
         # gripper: 1
         # task: 2 (pick_idx, place_idx，整数但存为float)
         img_dim   = N * 3 * CROP_SIZE * CROP_SIZE
@@ -205,7 +226,6 @@ class SagittariusPickPlaceEnv(gym.Env):
         self.pos_dim  = pos_dim
         self.bin_dim  = bin_dim
         self.obs_dim  = obs_dim
-        self.N        = N   # = n_active
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
@@ -213,13 +233,12 @@ class SagittariusPickPlaceEnv(gym.Env):
         )
 
         # ── 动作空间 ──────────────────────────────────────────────────────
-        # [primitive(0-1), obj_index(0 to 2N-1), pose_id(0..K-1), res_x, res_y]
-        # obj_index 0..N-1 = 方块（本回合 _active_colors 顺序）
-        # obj_index N..2N-1 = 桶索引（同上）
+        # obj_index 最大 = n_blocks_ep + n_bins_ep - 1（2+2→3，3+2→4）
+        _max_obj_idx = float(self.n_blocks_ep + self.n_bins_ep - 1)
         self.action_space = spaces.Box(
             low=np.array( [0.0, 0.0, 0.0, -0.05, -0.05], dtype=np.float32),
             high=np.array(
-                [1.0, float(2*N-1), float(self.pose_id_count - 1), 0.05, 0.05],
+                [1.0, _max_obj_idx, float(self.pose_id_count - 1), 0.05, 0.05],
                 dtype=np.float32,
             )
         )
@@ -238,6 +257,12 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 当前episode中物体位置缓存（含噪声）
         self._block_positions: dict = {}   # color → np.array([x,y])
         self._bin_positions:   dict = {}   # color → np.array([x,y])
+
+    @property
+    def _active_colors(self) -> List[str]:
+        """兼容旧接口：本回合场景中出现的颜色（去重后排序）。"""
+        return sorted(
+            set(self._active_block_colors) | set(self._active_bin_colors))
 
     # ── ROS初始化 ──────────────────────────────────────────────────────────
 
@@ -330,9 +355,9 @@ class SagittariusPickPlaceEnv(gym.Env):
     def _sync_moveit_planning_scene(self, ignore_block_color: str = None):
         """
         将当前激活物体同步到 MoveIt PlanningScene：
-        - 清理上轮对象（6色方块+桶）
+        - 清理上轮对象（6 色方块+桶）
         - 添加桌面碰撞体
-        - 仅添加本轮激活的 3 方块 + 3 桶（位姿来自 Gazebo model_states）
+        - 仅添加本轮需要的方块与桶（位姿来自 Gazebo model_states）
         """
         if self._planning_scene is None:
             return
@@ -355,9 +380,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         table_pose.pose.orientation.w = 1.0
         self._planning_scene.add_box("workspace_table", table_pose, (0.70, 0.70, 0.05))
 
-        # 激活方块 / 桶
-        for c in self._active_colors:
-            # 抓取目标方块在抓取阶段不应作为世界障碍物，否则末端无法下探抓取。
+        # 激活方块 / 桶（3+2 时仅部分颜色同时有方+桶）
+        for c in self._active_block_colors:
             if ignore_block_color is None or c != ignore_block_color:
                 bxyz = self._get_pose(block_name(c))
                 p = PoseStamped()
@@ -368,6 +392,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                 p.pose.orientation.w = 1.0
                 self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.04))
 
+        for c in self._active_bin_colors:
             zyz = self._get_pose(bin_name(c))
             q = PoseStamped()
             q.header.frame_id = "world"
@@ -375,7 +400,6 @@ class SagittariusPickPlaceEnv(gym.Env):
             q.pose.position.y = float(zyz[1])
             q.pose.position.z = float(zyz[2])
             q.pose.orientation.w = 1.0
-            # 简化为空桶外包络盒，供 MoveIt 避障
             self._planning_scene.add_box(bin_name(c), q, (0.07, 0.07, 0.12))
 
     def _model_cb(self, msg):
@@ -477,29 +501,48 @@ class SagittariusPickPlaceEnv(gym.Env):
                     self._teleport(nm, SPAWN_PARK_X, SPAWN_PARK_Y0 + park_i * 0.2, zc)
                     park_i += 1
 
-        # ── 仅为激活颜色补齐模型（不再依赖 model_states 判定，避免竞态） ──
+        # ── 仅为本回合需要的方块/桶补齐模型（3+2 时某色可能仅有方块无桶） ──
         spawn_k = 0
-        for c in self._active_colors:
-            for nm, zc in ((block_name(c), BLOCK_H / 2.0),
-                           (bin_name(c), BIN_H / 2.0)):
-                xml = model_xml_for_spawn(nm)
-                if xml is None:
-                    rospy.logerr(f"[Env] 无法为 {nm} 生成 spawn XML，请检查 world 文件")
-                    continue
-                pose = Pose()
-                pose.position.x = SPAWN_PARK_X + spawn_k * 0.06
-                pose.position.y = SPAWN_PARK_Y0 + spawn_k * 0.14
-                pose.position.z = zc
-                pose.orientation.w = 1.0
-                if self._spawn_model_srv is not None:
-                    if self._spawn_model_safe(nm, xml, pose):
-                        spawn_k += 1
-                    else:
-                        self._teleport(nm, pose.position.x, pose.position.y, zc)
-                        spawn_k += 1
+        for c in self._active_block_colors:
+            nm, zc = block_name(c), BLOCK_H / 2.0
+            xml = model_xml_for_spawn(nm)
+            if xml is None:
+                rospy.logerr(f"[Env] 无法为 {nm} 生成 spawn XML，请检查 world 文件")
+                continue
+            pose = Pose()
+            pose.position.x = SPAWN_PARK_X + spawn_k * 0.06
+            pose.position.y = SPAWN_PARK_Y0 + spawn_k * 0.14
+            pose.position.z = zc
+            pose.orientation.w = 1.0
+            if self._spawn_model_srv is not None:
+                if self._spawn_model_safe(nm, xml, pose):
+                    spawn_k += 1
                 else:
                     self._teleport(nm, pose.position.x, pose.position.y, zc)
                     spawn_k += 1
+            else:
+                self._teleport(nm, pose.position.x, pose.position.y, zc)
+                spawn_k += 1
+        for c in self._active_bin_colors:
+            nm, zc = bin_name(c), BIN_H / 2.0
+            xml = model_xml_for_spawn(nm)
+            if xml is None:
+                rospy.logerr(f"[Env] 无法为 {nm} 生成 spawn XML，请检查 world 文件")
+                continue
+            pose = Pose()
+            pose.position.x = SPAWN_PARK_X + spawn_k * 0.06
+            pose.position.y = SPAWN_PARK_Y0 + spawn_k * 0.14
+            pose.position.z = zc
+            pose.orientation.w = 1.0
+            if self._spawn_model_srv is not None:
+                if self._spawn_model_safe(nm, xml, pose):
+                    spawn_k += 1
+                else:
+                    self._teleport(nm, pose.position.x, pose.position.y, zc)
+                    spawn_k += 1
+            else:
+                self._teleport(nm, pose.position.x, pose.position.y, zc)
+                spawn_k += 1
         rospy.sleep(0.1)
 
     def _deterministic_grid(self, n: int, zone_x: tuple,
@@ -535,23 +578,81 @@ class SagittariusPickPlaceEnv(gym.Env):
         s = rr / r
         return np.array([ARM_BASE_X + dx * s, ARM_BASE_Y + dy * s], dtype=np.float32)
 
+    def _greedy_grid_centers(self, n_needed: int, gap: float,
+                             rng: np.random.Generator) -> List[Tuple[float, float]]:
+        """从 OBJECT_ZONE 内细网格中心点中贪心选取 n 个，两两距离 ≥ gap。
+
+        注意：候选网格步长必须 **小于** gap，否则窄矩形内格点过少，无法摆下 4~5 个物体。
+        """
+        span_x = OBJECT_ZONE_X[1] - OBJECT_ZONE_X[0]
+        span_y = OBJECT_ZONE_Y[1] - OBJECT_ZONE_Y[0]
+        cell = max(0.04, min(gap * 0.52, span_x / 5.0, span_y / 7.0))
+        candidates = self._deterministic_grid(
+            max(80, n_needed * 20), OBJECT_ZONE_X, OBJECT_ZONE_Y, cell)
+        if len(candidates) < n_needed:
+            cell2 = max(0.035, cell * 0.85)
+            candidates = self._deterministic_grid(
+                max(80, n_needed * 20), OBJECT_ZONE_X, OBJECT_ZONE_Y, cell2)
+        rng.shuffle(candidates)
+        selected: List[Tuple[float, float]] = []
+        for pt in candidates:
+            if len(selected) >= n_needed:
+                break
+            x, y = float(pt[0]), float(pt[1])
+            if all(
+                np.hypot(x - sx, y - sy) >= gap - 1e-9
+                for sx, sy in selected
+            ):
+                selected.append((x, y))
+        return selected
+
     def _place_active_objects_unified(self, rng: np.random.Generator) -> None:
-        """在 OBJECT_ZONE 内为 3 方块 + 3 桶采样位置，两两中心距 ≥ MIN_OBJECT_CENTER_GAP。"""
-        targets = []
-        for c in self._active_colors:
+        """在 OBJECT_ZONE 内摆放本回合所有方块与桶；优先网格+微抖动，再随机重试。"""
+        targets: List[Tuple[str, float]] = []
+        for c in self._active_block_colors:
             targets.append((block_name(c), BLOCK_H / 2.0))
+        for c in self._active_bin_colors:
             targets.append((bin_name(c), BIN_H / 2.0))
 
-        placed_xy = []
+        n = len(targets)
+        gap = float(MIN_OBJECT_CENTER_GAP)
+
+        def _try_assign(centers: List[Tuple[float, float]]) -> bool:
+            if len(centers) < n:
+                return False
+            centers = centers[:n]
+            perm = list(range(n))
+            rng.shuffle(perm)
+            jitter = float(OBJECT_PLACE_JITTER)
+            for k in range(n):
+                t_idx = perm[k]
+                nm, zc = targets[t_idx]
+                x, y = centers[k]
+                x += float(rng.uniform(-jitter, jitter))
+                y += float(rng.uniform(-jitter, jitter))
+                if not self._is_reachable_xy(x, y):
+                    xy = self._project_to_reachable_xy(x, y)
+                    x, y = float(xy[0]), float(xy[1])
+                self._teleport(nm, x, y, zc)
+            return True
+
+        centers = self._greedy_grid_centers(n, gap, rng)
+        if _try_assign(centers):
+            return
+
+        rospy.logwarn(
+            "[Env] 网格摆放失败，回退到随机采样（仍保证间距与可达域）")
+
+        placed_xy: List[Tuple[float, float]] = []
         for idx, (nm, zc) in enumerate(targets):
             ok = False
-            for _ in range(280):
+            for _ in range(400):
                 x = float(rng.uniform(*OBJECT_ZONE_X))
                 y = float(rng.uniform(*OBJECT_ZONE_Y))
                 if not self._is_reachable_xy(x, y):
                     continue
                 if all(
-                    np.hypot(x - px, y - py) >= MIN_OBJECT_CENTER_GAP
+                    np.hypot(x - px, y - py) >= gap
                     for px, py in placed_xy
                 ):
                     placed_xy.append((x, y))
@@ -561,9 +662,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             if ok:
                 continue
             grid = self._deterministic_grid(
-                len(targets), OBJECT_ZONE_X, OBJECT_ZONE_Y,
-                MIN_OBJECT_CENTER_GAP,
-            )
+                n, OBJECT_ZONE_X, OBJECT_ZONE_Y, gap)
             if idx < len(grid):
                 x, y = grid[idx]
                 placed_xy.append((x, y))
@@ -573,25 +672,36 @@ class SagittariusPickPlaceEnv(gym.Env):
             else:
                 rospy.logerr(
                     "[Env] 物体无法摆放：请扩大 OBJECT_ZONE_* 或减小 "
-                    "MIN_OBJECT_CENTER_GAP / n_active")
+                    "MIN_OBJECT_CENTER_GAP / 物体数量")
 
     def _randomize_scene(self):
         """
         随机化场景：
-          1. 抽取本 episode 激活颜色与任务；
-          2. 未激活模型从 Gazebo 删除；缺失的激活模型按 world 模板 spawn；
-          3. 激活的 3 方块 + 3 桶在统一桌面区域内随机摆放，两两间距约束。
+          1. 按 curriculum_mode 抽取方块/桶颜色子集与任务；
+          2. 未激活模型从 Gazebo 删除；缺失模型按 world 模板 spawn；
+          3. 在 OBJECT_ZONE_* 内摆放（网格优先 + 微抖动），中心距 ≥ MIN_OBJECT_CENTER_GAP。
         """
         rng = np.random.default_rng()
 
         all_colors = list(self.color_cfg.colors)
         rng.shuffle(all_colors)
-        self._active_colors = all_colors[: self.n_active]
 
-        self.pick_color  = self._active_colors[0]
-        remaining        = [c for c in self._active_colors
-                            if c != self.pick_color]
-        self.place_color = rng.choice(remaining) if remaining else self._active_colors[0]
+        if self.curriculum_mode == "2+2":
+            self._active_block_colors = all_colors[:2]
+            self._active_bin_colors = list(self._active_block_colors)
+            rng.shuffle(self._active_block_colors)
+            rng.shuffle(self._active_bin_colors)
+        else:
+            # 3+2：3 个方块，桶为其中 2 色（第 3 色为干扰块，无对应桶）
+            self._active_block_colors = all_colors[:3]
+            rng.shuffle(self._active_block_colors)
+            pair = rng.choice(
+                list(itertools.combinations(self._active_block_colors, 2)))
+            self._active_bin_colors = list(pair)
+            rng.shuffle(self._active_bin_colors)
+
+        self.pick_color = rng.choice(self._active_block_colors)
+        self.place_color = rng.choice(self._active_bin_colors)
 
         self._sync_gazebo_models_delete_or_spawn()
         self._place_active_objects_unified(rng)
@@ -603,9 +713,10 @@ class SagittariusPickPlaceEnv(gym.Env):
     def _refresh_positions(self):
         """刷新激活颜色物体的带噪声位置缓存（每次step调用）。"""
         noise = lambda: np.random.normal(0, self.noise_sigma, 2)
-        for color in self._active_colors:
+        for color in self._active_block_colors:
             xyz = self._get_pose(block_name(color))
             self._block_positions[color] = xyz[:2] + noise()
+        for color in self._active_bin_colors:
             xyz = self._get_pose(bin_name(color))
             self._bin_positions[color]   = xyz[:2] + noise()
 
@@ -621,29 +732,33 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_crops(self) -> np.ndarray:
         """
-        提取激活颜色方块对应的图像 crop。
-        返回形状 (n_active, 3, 28, 28)
+        提取方块槽位对应的图像 crop（SLOT_COUNT 行；空槽为黑图）。
+        返回形状 (SLOT_COUNT, 3, 28, 28)
         """
         import cv2
         crops = []
         img = self._latest_image
 
-        for color in self._active_colors:
-            block_pos = self._get_block_pos(color)
-            if img is not None:
-                u, v = self._robot_to_pixel(block_pos)
-                h, w = img.shape[:2]
-                u, v = int(np.clip(u, 14, w-14)), int(np.clip(v, 14, h-14))
-                crop = img[v-14:v+14, u-14:u+14]
-                if crop.shape[:2] != (28, 28):
-                    crop = np.zeros((28, 28, 3), dtype=np.uint8)
-                crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                crop = crop.astype(np.float32) / 255.0
+        for slot in range(SLOT_COUNT):
+            if slot < len(self._active_block_colors):
+                color = self._active_block_colors[slot]
+                block_pos = self._get_block_pos(color)
+                if img is not None:
+                    u, v = self._robot_to_pixel(block_pos)
+                    h, w = img.shape[:2]
+                    u, v = int(np.clip(u, 14, w-14)), int(np.clip(v, 14, h-14))
+                    crop = img[v-14:v+14, u-14:u+14]
+                    if crop.shape[:2] != (28, 28):
+                        crop = np.zeros((28, 28, 3), dtype=np.uint8)
+                    crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    crop = crop.astype(np.float32) / 255.0
+                else:
+                    crop = np.zeros((28, 28, 3), dtype=np.float32)
             else:
                 crop = np.zeros((28, 28, 3), dtype=np.float32)
             crops.append(crop.transpose(2, 0, 1))
 
-        return np.array(crops, dtype=np.float32)  # (n_active, 3, 28, 28)
+        return np.array(crops, dtype=np.float32)  # (SLOT_COUNT, 3, 28, 28)
 
     def _robot_to_pixel(self, xy: np.ndarray) -> Tuple[float, float]:
         """机械臂坐标 → 像素坐标（需要标定值）。"""
@@ -657,30 +772,35 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _build_observation(self) -> np.ndarray:
         """
-        构建完整 observation 向量（仅包含激活颜色）。
-        布局：[crops(N*3*28*28) | block_pos(N*2) | bin_pos(N*2) | gripper(1) | task(2)]
-        N = n_active（本 episode 激活的颜色数）
+        构建完整 observation 向量（固定 SLOT_COUNT 槽位，未满填零）。
+        布局：[crops | block_pos | bin_pos | gripper | task]
         """
         self._refresh_positions()
 
-        crops = self._build_crops()   # (n_active, 3, 28, 28)
+        crops = self._build_crops()   # (SLOT_COUNT, 3, 28, 28)
 
-        block_pos = np.array(
-            [self._get_block_pos(c) for c in self._active_colors],
-            dtype=np.float32).flatten()
+        bp_list = []
+        for slot in range(SLOT_COUNT):
+            if slot < len(self._active_block_colors):
+                bp_list.append(self._get_block_pos(self._active_block_colors[slot]))
+            else:
+                bp_list.append(np.zeros(2, dtype=np.float32))
+        block_pos = np.array(bp_list, dtype=np.float32).flatten()
 
-        bin_pos = np.array(
-            [self._get_bin_pos(c) for c in self._active_colors],
-            dtype=np.float32).flatten()
+        bn_list = []
+        for slot in range(SLOT_COUNT):
+            if slot < len(self._active_bin_colors):
+                bn_list.append(self._get_bin_pos(self._active_bin_colors[slot]))
+            else:
+                bn_list.append(np.zeros(2, dtype=np.float32))
+        bin_pos = np.array(bn_list, dtype=np.float32).flatten()
 
         gripper = np.array(
             [0.0 if self._gripper_open else 1.0], dtype=np.float32)
 
-        # 任务编码：在 _active_colors 列表中的局部 index（0~n_active-1）
-        pick_local  = self._active_colors.index(self.pick_color)
-        place_local = self._active_colors.index(self.place_color)
-        task = np.array([float(pick_local), float(place_local)],
-                        dtype=np.float32)
+        pick_local  = float(self._active_block_colors.index(self.pick_color))
+        place_local = float(self._active_bin_colors.index(self.place_color))
+        task = np.array([pick_local, place_local], dtype=np.float32)
 
         obs = np.concatenate([
             crops.flatten(), block_pos, bin_pos, gripper, task,
@@ -995,10 +1115,15 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         obs  = self._build_observation()
         info = {
-            "pick_color":    self.pick_color,
-            "place_color":   self.place_color,
-            "active_colors": list(self._active_colors),
-            "n_colors":      self.n_active,
+            "pick_color":          self.pick_color,
+            "place_color":         self.place_color,
+            "active_colors":       list(self._active_colors),
+            "active_block_colors": list(self._active_block_colors),
+            "active_bin_colors":   list(self._active_bin_colors),
+            "curriculum_mode":     self.curriculum_mode,
+            "n_blocks":            self.n_blocks_ep,
+            "n_bins":              self.n_bins_ep,
+            "n_colors":            self.n_active,
         }
         return obs, info
 
@@ -1007,7 +1132,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         # 解码动作
         primitive = int(np.round(np.clip(action[0], 0, 1)))
-        obj_idx   = int(np.round(np.clip(action[1], 0, 2*self.N - 1)))
+        max_obj = self.n_blocks_ep + self.n_bins_ep - 1
+        obj_idx   = int(np.round(np.clip(action[1], 0, max_obj)))
         if len(action) >= 5:
             pose_id = int(np.round(np.clip(action[2], 0, self.pose_id_count - 1)))
             res_xy  = np.clip(action[3:5], -0.05, 0.05)
@@ -1016,13 +1142,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             pose_id = 0
             res_xy  = np.clip(action[2:4], -0.05, 0.05)
 
-        # obj_idx 0..N-1 = 方块，N..2N-1 = 桶（N = n_active）
-        # 颜色映射基于本 episode 的 _active_colors（而非全部颜色）
-        if obj_idx < self.N:
-            color   = self._active_colors[obj_idx]
+        # obj_idx 0..n_blocks-1 = 方块；n_blocks.. = 桶
+        nb = self.n_blocks_ep
+        if obj_idx < nb:
+            color   = self._active_block_colors[obj_idx]
             base_xy = self._get_block_pos(color)
         else:
-            color   = self._active_colors[obj_idx - self.N]
+            color   = self._active_bin_colors[obj_idx - nb]
             base_xy = self._get_bin_pos(color)
 
         # 放置动作默认对准桶中心，保持“桶中心上方垂直下放”；
@@ -1068,6 +1194,8 @@ class SagittariusPickPlaceEnv(gym.Env):
             "pick_color":    self.pick_color,
             "place_color":   self.place_color,
             "active_colors": list(self._active_colors),
+            "active_block_colors": list(self._active_block_colors),
+            "active_bin_colors":   list(self._active_bin_colors),
         }
         return obs, reward, terminated, truncated, info
 

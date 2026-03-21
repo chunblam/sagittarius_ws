@@ -52,13 +52,17 @@ def get_args():
                    help="Lab2 标定 yaml 路径（不指定则使用默认标定值）")
     p.add_argument("--split-x",       type=int, default=320,
                    help="图像左右分区分割线（像素），左=方块，右=桶")
+    p.add_argument(
+        "--curriculum", type=str, default="2+2", choices=["2+2", "3+2"],
+        help="须与训练时一致（2+2 或 3+2）")
     return p.parse_args()
 
 
 # ── 仿真评估（不变） ───────────────────────────────────────────────────────────
 
 def eval_sim(model_path: str, n_episodes: int, task: str,
-             colors=None, yaml_path=None, pose_id_count: int = 1):
+             colors=None, yaml_path=None, pose_id_count: int = 1,
+             curriculum_mode: str = "2+2"):
     import rospy
     from config.color_config import ColorConfig
     from envs.pick_place_env import SagittariusPickPlaceEnv
@@ -74,7 +78,8 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
 
     model = ExploRLLMSAC.load(model_path)
     env   = SagittariusPickPlaceEnv(
-        task=task, max_steps=10, color_config=cfg, pose_id_count=pose_id_count
+        task=task, max_steps=10, color_config=cfg, pose_id_count=pose_id_count,
+        curriculum_mode=curriculum_mode,
     )
 
     results   = {"episodes": []}
@@ -96,12 +101,11 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
             steps += 1
             prim  = int(round(float(action[0])))
             obj_i = int(round(float(action[1])))
-            na    = env.n_active
-            ac    = env._active_colors
-            if obj_i < na:
-                c, t_str = ac[obj_i], "block"
+            nb = env.n_blocks_ep
+            if obj_i < nb:
+                c, t_str = env._active_block_colors[obj_i], "block"
             else:
-                c, t_str = ac[obj_i - na], "bin"
+                c, t_str = env._active_bin_colors[obj_i - nb], "bin"
             if len(action) >= 5:
                 pose_id = int(round(float(action[2])))
                 rx, ry = float(action[3]), float(action[4])
@@ -162,7 +166,10 @@ def eval_real_robot(args, n_episodes: int, task: str,
         cfg._build_index()
 
     model = ExploRLLMSAC.load(args.model_path)
-    env   = SagittariusPickPlaceEnv(task=task, max_steps=10, color_config=cfg)
+    env   = SagittariusPickPlaceEnv(
+        task=task, max_steps=10, color_config=cfg,
+        curriculum_mode=getattr(args, "curriculum", "2+2"),
+    )
 
     # 初始化 VLM 感知
     if not (args.vlm_api_key or "").strip():
@@ -213,21 +220,31 @@ def eval_real_robot(args, n_episodes: int, task: str,
         print(f"  {place_c}_bin   : "
               f"({binp[0]:.3f},{binp[1]:.3f})" if binp else "  目标桶未检测到！")
 
-        active = list(info.get("active_colors") or env._active_colors)
-        obs = _inject_camera_positions(obs, scene, active)
+        obs = _inject_camera_positions(
+            obs, scene,
+            block_colors=list(info.get("active_block_colors")
+                              or env._active_block_colors),
+            bin_colors=list(info.get("active_bin_colors")
+                            or env._active_bin_colors))
 
         ep_r = 0.0
         done = trunc = False
         while not (done or trunc):
             # 每步刷新场景（方块被抓起后位置变化）
             scene = camera.scan_scene(wait_sec=0.2, n_retry=1)
-            active = list(env._active_colors)
-            obs   = _inject_camera_positions(obs, scene, active)
+            obs   = _inject_camera_positions(
+                obs, scene,
+                block_colors=env._active_block_colors,
+                bin_colors=env._active_bin_colors)
 
             action, _ = model.predict(obs, deterministic=True)
             obs, r, done, trunc, step_info = env.step(action)
-            active = list(step_info.get("active_colors") or env._active_colors)
-            obs = _inject_camera_positions(obs, scene, active)
+            obs = _inject_camera_positions(
+                obs, scene,
+                block_colors=list(step_info.get("active_block_colors")
+                                  or env._active_block_colors),
+                bin_colors=list(step_info.get("active_bin_colors")
+                                or env._active_bin_colors))
             ep_r += r
 
         rewards.append(ep_r)
@@ -244,21 +261,23 @@ def eval_real_robot(args, n_episodes: int, task: str,
     return {"success_rate": sr, "mean_reward": float(np.mean(rewards))}
 
 
-def _inject_camera_positions(obs: np.ndarray, scene: dict,
-                             active_colors: list) -> np.ndarray:
-    """将摄像头检测到的坐标注入 observation（顺序与 env 的 active_colors 槽位一致）。"""
+def _inject_camera_positions(
+        obs: np.ndarray, scene: dict,
+        block_colors: list,
+        bin_colors: list) -> np.ndarray:
+    """将摄像头检测到的坐标注入 observation（与 env 的 SLOT_COUNT 槽位一致）。"""
     obs = obs.copy()
-    N       = len(active_colors)
+    N       = 3
     img_dim = N * 3 * 28 * 28
     pos_dim = N * 2
 
-    for i, c in enumerate(active_colors):
+    for i, c in enumerate(block_colors[:N]):
         pos = scene["blocks"].get(c)
         if pos is not None:
             s = img_dim + i * 2
             obs[s], obs[s+1] = pos[0], pos[1]
 
-    for i, c in enumerate(active_colors):
+    for i, c in enumerate(bin_colors[:N]):
         pos = scene["bins"].get(c)
         if pos is not None:
             s = img_dim + pos_dim + i * 2
@@ -346,7 +365,8 @@ def main():
     else:
         results = eval_sim(
             args.model_path, args.n_episodes, args.task,
-            args.colors, args.yaml_path, args.pose_id_count)
+            args.colors, args.yaml_path, args.pose_id_count,
+            curriculum_mode=args.curriculum)
 
     out_file = out / "eval_results.json"
     with open(out_file, "w") as f:

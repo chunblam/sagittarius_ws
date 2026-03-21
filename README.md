@@ -32,7 +32,7 @@ sagittarius_ws/
 ├── eval.py                      ← 评估 + 训练曲线绘图
 ├── test_all.py                  ← 分步环境验证测试
 ├── calibration_guide.py         ← 标定值读取工具
-├── pick_place_scene.world    ← Gazebo 场景（6 色 12 物体模型；训练每回合仅 n_active=3 激活）
+├── pick_place_scene.world    ← Gazebo 场景（6 色 12 物体模型；训练按课程 2+2 / 3+2 激活子集）
 └── README.md
 ```
 
@@ -68,7 +68,7 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
 
-**训练观测维度**：环境每回合随机激活 **`n_active=3`** 种颜色（见 `envs/pick_place_env.py` 中 `ACTIVE_COLORS_PER_EPISODE`），`obs_dim` 随 `n_active` 变化；**与旧版 6 槽位模型不兼容，需重新训练**。
+**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）；方块/桶在 `OBJECT_ZONE_*` 内随机，**物体中心最小间距 0.10m**，区域相对旧版已**左移**以贴近机械臂可达「甜区」。**与旧 checkpoint 不兼容时需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
@@ -114,6 +114,10 @@ python test_all.py --test 2
 ```bash
 # 纯SAC（不需要API Key，用于验证训练循环能跑通）
 python train.py --epsilon 0.0
+
+# 推荐先训 2+2（2 方块 + 2 桶），再训 3+2（多 1 个干扰方块）
+python train.py --epsilon 0.0 --curriculum 2+2
+# python train.py --epsilon 0.0 --curriculum 3+2
 
 # 完整 ExploRLLM（DeepSeek，推荐）
 export LLM_API_KEY="sk-你的key"

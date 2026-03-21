@@ -240,31 +240,51 @@ class ExploRLLMSAC(SAC):
         place_local = int(np.clip(round(float(task[1])), 0, N - 1))
 
         ppe = self._unwrap_pick_place_env()
-        if ppe is not None:
-            active = list(ppe._active_colors)[:N]
+        bc_list: list = []
+        bn_list: list = []
+        if ppe is not None and hasattr(ppe, "_active_block_colors"):
+            bc = list(ppe._active_block_colors)
+            bn = list(ppe._active_bin_colors)
+            bc_list, bn_list = bc, bn
+            pick_local = int(np.clip(pick_local, 0, max(len(bc) - 1, 0)))
+            place_local = int(np.clip(place_local, 0, max(len(bn) - 1, 0)))
+            pick_color = bc[pick_local]
+            place_color = bn[place_local]
+            positions = {}
+            for i in range(N):
+                cb = bc[i] if i < len(bc) else None
+                bb = bn[i] if i < len(bn) else None
+                if cb is not None:
+                    positions[f"{cb}_block"] = block_pos[i].tolist()
+                if bb is not None:
+                    positions[f"{bb}_bin"] = bin_pos[i].tolist()
+            active = sorted(set(bc) | set(bn))
         else:
-            from config.color_config import get_color_config
-            cfg = get_color_config()
-            active = list(cfg.colors[:N])
-        if len(active) < N:
-            from config.color_config import get_color_config
-            fill = [c for c in get_color_config().colors if c not in active]
-            active = active + fill[: N - len(active)]
-        active = active[:N]
-
-        pick_color  = active[pick_local]
-        place_color = active[place_local]
-
-        positions = {}
-        for i, c in enumerate(active[:N]):
-            positions[f"{c}_block"] = block_pos[i].tolist()
-            positions[f"{c}_bin"]   = bin_pos[i].tolist()
+            if ppe is not None:
+                active = list(ppe._active_colors)[:N]
+            else:
+                from config.color_config import get_color_config
+                cfg = get_color_config()
+                active = list(cfg.colors[:N])
+            if len(active) < N:
+                from config.color_config import get_color_config
+                fill = [c for c in get_color_config().colors if c not in active]
+                active = active + fill[: N - len(active)]
+            active = active[:N]
+            pick_color  = active[pick_local]
+            place_color = active[place_local]
+            positions = {}
+            for i, c in enumerate(active[:N]):
+                positions[f"{c}_block"] = block_pos[i].tolist()
+                positions[f"{c}_bin"]   = bin_pos[i].tolist()
+            bc_list = list(active[:N])
+            bn_list = list(active[:N])
 
         held = None
         if ppe is not None and getattr(ppe, "_holding_color", None):
             held = f"{ppe._holding_color}_block"
 
-        return {
+        out = {
             "positions":     positions,
             "gripper":       "open" if gripper < 0.5 else "closed",
             "pick_color":    pick_color,
@@ -272,7 +292,12 @@ class ExploRLLMSAC(SAC):
             "held_object":   held,
             "active_colors": active[:N],
             "n_active":      N,
+            "n_blocks":      len(bc_list),
+            "n_bins":        len(bn_list),
+            "active_block_colors": bc_list,
+            "active_bin_colors":   bn_list,
         }
+        return out
 
     def _extract_crops(self, obs: np.ndarray) -> np.ndarray:
         N = self.n_colors

@@ -278,34 +278,40 @@ def test_5_env_reset_step():
             if np.all(bin_pos == 0):
                 warn("  桶位置全是 0，检查 Gazebo 桶模型是否加载")
 
-            # 桶间距检查（8cm）
-            for i in range(na):
-                for j in range(i + 1, na):
-                    d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
-                    if d < 0.08:
+            # 物体两两间距（≥10cm，与 MIN_OBJECT_CENTER_GAP 一致）
+            pts = []
+            for c in env._active_block_colors:
+                pts.append(env._get_pose(f"{c}_block")[:2])
+            for c in env._active_bin_colors:
+                pts.append(env._get_pose(f"{c}_bin")[:2])
+            for i in range(len(pts)):
+                for j in range(i + 1, len(pts)):
+                    d = float(np.linalg.norm(pts[i] - pts[j]))
+                    if d < 0.10:
                         spacing_violations += 1
-                        warn(f"  reset#{ridx+1} 桶 {active[i]} 与 {active[j]} 距离过近: "
-                             f"{d:.3f} m（应 ≥ 0.08 m）")
+                        warn(f"  reset#{ridx+1} 物体 {i} 与 {j} 距离过近: "
+                             f"{d:.3f} m（应 ≥ 0.10 m）")
 
             # 可达性检查（若环境提供可达性函数）
             # 注意：这里用 Gazebo GT 位姿，不用 obs 带噪声位姿，避免误报。
             if hasattr(env, "_is_reachable_xy"):
-                for i, c in enumerate(active):
+                for c in env._active_block_colors:
                     bxyz = env._get_pose(f"{c}_block")
-                    zxyz = env._get_pose(f"{c}_bin")
                     bp = bxyz[:2]
-                    zp = zxyz[:2]
                     if not env._is_reachable_xy(float(bp[0]), float(bp[1])):
                         unreachable_count += 1
                         warn(f"  reset#{ridx+1} {c}_block GT位置超出可达域: {bp}")
+                for c in env._active_bin_colors:
+                    zxyz = env._get_pose(f"{c}_bin")
+                    zp = zxyz[:2]
                     if not env._is_reachable_xy(float(zp[0]), float(zp[1])):
                         unreachable_count += 1
                         warn(f"  reset#{ridx+1} {c}_bin   GT位置超出可达域: {zp}")
 
         if spacing_violations == 0:
-            ok(f"{n_reset} 次 reset：桶间距检查通过（阈值 0.08m）")
+            ok(f"{n_reset} 次 reset：物体间距检查通过（阈值 0.10m）")
         else:
-            warn(f"{n_reset} 次 reset：发现 {spacing_violations} 次桶间距过近")
+            warn(f"{n_reset} 次 reset：发现 {spacing_violations} 次物体间距过近")
         if unreachable_count == 0:
             ok(f"{n_reset} 次 reset：物体位置均在可达域内")
         else:
@@ -319,7 +325,7 @@ def test_5_env_reset_step():
 
         # ── B. 奖励方向检查：正确 pick vs 错误 pick ───────────────────────
         info("\n奖励方向检查：正确 pick vs 错误 pick")
-        pick_idx = active.index(pick_color)
+        pick_idx = env._active_block_colors.index(pick_color)
         action_correct = np.array(
             [0.0, float(pick_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
@@ -329,7 +335,8 @@ def test_5_env_reset_step():
         if not info2.get("success"):
             _dump_recent_events("  正确 pick 失败，最近阶段记录：")
 
-        wrong_idx = (pick_idx + 1) % na   # 选一个不同的激活颜色
+        nb_ep = env.n_blocks_ep
+        wrong_idx = (pick_idx + 1) % nb_ep   # 选一个不同的方块槽位
         action_wrong = np.array(
             [0.0, float(wrong_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
@@ -353,9 +360,12 @@ def test_5_env_reset_step():
         for k in range(closed_loop_trials):
             obs, info_dict = env.reset()
             active = list(info_dict.get("active_colors", env._active_colors))
-            pick_idx = active.index(info_dict.get("pick_color"))
-            place_idx = active.index(info_dict.get("place_color"))
+            pick_idx = env._active_block_colors.index(
+                info_dict.get("pick_color"))
+            place_idx = env._active_bin_colors.index(
+                info_dict.get("place_color"))
             na = env.n_active
+            nb_ep = env.n_blocks_ep
             pose_count = max(1, getattr(env, "pose_id_count", 1))
             pose_cursor = 0
             ep_done = False
@@ -377,7 +387,7 @@ def test_5_env_reset_step():
                     # 已持物：执行 place
                     pose_id = (pose_cursor - 1) % pose_count
                     action = np.array(
-                        [1.0, float(na + place_idx), float(pose_id), 0.0, 0.0],
+                        [1.0, float(nb_ep + place_idx), float(pose_id), 0.0, 0.0],
                         dtype=np.float32,
                     )
                     phase = f"place pose_id={pose_id}"
@@ -523,12 +533,13 @@ def test_7_llm_api():
         from config.color_config import get_color_config
 
         cfg    = get_color_config()
-        from envs.pick_place_env import ACTIVE_COLORS_PER_EPISODE
-        na     = min(ACTIVE_COLORS_PER_EPISODE, cfg.n_colors)
-        if na < 2:
+        from envs.pick_place_env import SLOT_COUNT
+        na = SLOT_COUNT
+        if cfg.n_colors < 2:
             warn("ColorConfig 颜色数 < 2，跳过 LLM 物体索引语义检查")
             return True
-        active = list(cfg.colors[:na])
+        bc = list(cfg.colors[:2])
+        bn = list(cfg.colors[:2])
 
         policy = LLMExplorationPolicy(
             api_key=api_key, base_url=llm_base_url(), model=model,
@@ -536,27 +547,32 @@ def test_7_llm_api():
             n_active=na)
 
         positions = {}
-        for i, c in enumerate(active):
+        for i, c in enumerate(bc):
             positions[f"{c}_block"] = [0.18 + i * 0.02, -0.1 + i * 0.05]
+        for i, c in enumerate(bn):
             positions[f"{c}_bin"] = [0.35 + i * 0.01, 0.0 + i * 0.06]
 
         obs_dict = {
             "positions":   positions, "gripper": "open",
-            "pick_color":  active[0], "place_color": active[1],
+            "pick_color":  bc[0], "place_color": bn[1],
             "held_object": None,
-            "active_colors": active,
+            "active_colors": sorted(set(bc) | set(bn)),
             "n_active":    na,
+            "n_blocks":    len(bc),
+            "n_bins":      len(bn),
+            "active_block_colors": bc,
+            "active_bin_colors":   bn,
         }
 
         t0 = time.time()
         prim, obj_idx = policy.call_high_level(obs_dict)
         ok(f"LLM API 调用成功 ({time.time()-t0:.1f}s)  "
-           f"primitive={prim}  obj_idx={obj_idx}")
+            f"primitive={prim}  obj_idx={obj_idx}")
 
-        if obj_idx < na:
-            ok(f"  → {active[obj_idx]}_block")
+        if obj_idx < len(bc):
+            ok(f"  → {bc[obj_idx]}_block")
         else:
-            ok(f"  → {active[obj_idx - na]}_bin")
+            ok(f"  → {bn[obj_idx - len(bc)]}_bin")
 
         if prim == 0:
             ok("返回值合理（夹爪 open → 应 pick）")
