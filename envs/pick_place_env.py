@@ -6,7 +6,7 @@ pick_place_env.py
 升级版环境，相比原版的核心变化：
 
   变化1：支持任意多种颜色（从color_config动态读取，不再写死3种）
-  变化2：垃圾桶位置随机（每次episode随机传送到桌面不同位置）
+  变化2：垃圾桶/方块位置随机（每次 episode 在桌面中央作业矩形内随机，见 OBJECT_ZONE_*）
   变化3：observation向量用颜色index代替one-hot（支持任意颜色数）
   变化4：observation包含桶的位置（因为桶不再固定，必须告诉policy桶在哪）
 
@@ -71,11 +71,16 @@ DEFAULT_POSE_ID_COUNT = 1
 # 个模型会永远留在桌上。
 WORLD_SPAWN_COLORS = ("red", "green", "blue", "yellow", "pink", "orange")
 
-# 激活物体（3 方块 + 3 桶）统一随机区域：70cm 桌面略收边，与机械臂工作区大致一致
-# 不再区分「左方块 / 右桶」；任意两物体中心距 ≥ MIN_OBJECT_CENTER_GAP
-OBJECT_ZONE_X = (0.12, 0.56)
-OBJECT_ZONE_Y = (-0.28, 0.28)
-MIN_OBJECT_CENTER_GAP = 0.12
+# 激活物体（3 方块 + 3 桶）随机区域：桌面中央「作业矩形」
+# 实物参考（与图中黑框一致）：一排 3 个桶（底约 6.5cm 见方）+ 下方/侧向一块前景矩形（约 20cm 宽 × 12–15cm 深）；
+# 桶行与前景区均在机械臂可达范围内，仿真里在略扩大的矩形内统一随机，避免整桌乱跑。
+# 世界系：桌面中心约 (0.28,0)；矩形须落在 ARM_* 可达环 [ARM_REACH_MIN_R, ARM_REACH_MAX_R] 内，
+# 角点已校验，避免「基座近圆心」或「伸臂过远」导致规划无解。
+# 当前约：x 方向 ~13.5cm、y 方向 ~28cm（在环与桌面允许范围内尽量与实物前景区对齐并略放宽）。
+OBJECT_ZONE_X = (0.44, 0.575)
+OBJECT_ZONE_Y = (-0.14, 0.14)
+# 6 个物体：间距略小于 12cm，否则小矩形内难以采样；仍保证物体可区分
+MIN_OBJECT_CENTER_GAP = 0.085
 
 # 可达性约束（基于当前台面与机械臂安装关系的保守圆域）
 ARM_BASE_X = 0.28
