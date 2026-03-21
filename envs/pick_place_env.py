@@ -120,7 +120,7 @@ SPAWN_PARK_Y0 = 0.0
 # GRASP_H 修正：
 #   方块顶面在 z = TABLE_Z + BLOCK_H（5cm 立方体时 0.05m）
 #   末端目标约在方块中部附近：TABLE_Z + GRASP_H ≈ TABLE_Z + BLOCK_H/2 + 小裕量
-#   当前 GRASP_H=0.03 → TABLE_Z+0.03（可按 TCP 与水平侧抓再微调）
+#   当前 GRASP_H=0.045 → TABLE_Z+0.045（相对原 0.03 抬高 1.5cm，可按 TCP 再微调）
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
@@ -134,9 +134,9 @@ BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
 APPROACH_H    = 0.18   # 接近高度（末端 z = 0.18m）
-# 抓取高度：世界系 z。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
-# 过低的单一目标易在下降过程中挤压方块/刮桌面。采用略高于几何中心 + 分步下降。
-GRASP_H       = 0.030  # 最终抓取末端 z（TABLE_Z + 该值），略高于原 0.025
+# 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
+# 过低的单一目标易刮桌面。在 0.03 基础上再 +1.5cm 以减轻偏低问题。
+GRASP_H       = 0.045  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系）
 # 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
 PRE_GRASP_CLEAR_Z = 0.02  # 在方块顶面上方预留的间隙（米），再落爪
 
@@ -1268,10 +1268,11 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._gripper_open  = True
         self._holding_color = None
 
+        # 先回 home 再随机摆物：避免上一局结束时臂仍伸在桌面上方时，物体先被 teleport 进连杆包络导致弹飞/穿模
+        self._return_home()
+        time.sleep(1.0)
         # _randomize_scene 内部会重新抽取 _active_colors 和任务颜色
         self._randomize_scene()
-        time.sleep(0.5)
-        self._return_home()
 
         obs  = self._build_observation()
         info = {
