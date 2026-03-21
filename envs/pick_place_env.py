@@ -261,7 +261,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.set_max_velocity_scaling_factor(0.4)
         self._moveit_arm.set_max_acceleration_scaling_factor(0.4)
         self._moveit_arm.allow_replanning(True)
-        self._moveit_arm.set_planning_time(10.0)
+        # 单次规划时间不宜过长；失败时由 _move_to_xy 内多策略重试（见下）
+        self._moveit_arm.set_planning_time(5.0)
         self._moveit_arm.set_num_planning_attempts(12)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
@@ -714,44 +715,76 @@ class SagittariusPickPlaceEnv(gym.Env):
         动态障碍更新，则主要避开机器人自身与环境静态模型；路径质量取决于
         OMPL 规划器与容差设置。
 
+        若某姿态下 IK/规划不可行（常见于仅绕 Z 的 yaw 约束），会依次尝试：
+          1) 给定 yaw 四元数
+          2) 中性姿态 (w=1)，让 planner 自选末端朝向
+          3) 略抬高 z（+0.05m）再试 1) 与 2)
+
         plan 失败直接返回 False。
         execute 失败（异常或返回 False）也返回 False，
         避免将"规划成功但执行失败"误报为 success=True 污染奖励信号。
         """
-        target = PoseStamped()
-        target.header.frame_id = "world"
-        target.pose.position.x = x
-        target.pose.position.y = y
-        target.pose.position.z = z
-        qx, qy, qz, qw = self._pose_for_yaw(yaw)
-        target.pose.orientation.x = qx
-        target.pose.orientation.y = qy
-        target.pose.orientation.z = qz
-        target.pose.orientation.w = qw
-        # 规划前同步一次场景，避免使用过期障碍位姿
+        # 规划前同步一次场景（避免每步重试重复同步）
         self._sync_moveit_planning_scene(ignore_block_color=ignore_block_color)
         self._moveit_arm.set_start_state_to_current_state()
-        self._moveit_arm.set_pose_target(
-            target, self._moveit_arm.get_end_effector_link())
-        plan_ok, traj, _, _ = self._moveit_arm.plan()
-        if not plan_ok:
+
+        ee_link = self._moveit_arm.get_end_effector_link()
+        attempts = []
+
+        def _add_attempt(label: str, qx: float, qy: float, qz: float, qw: float,
+                         zz: float):
+            attempts.append((label, qx, qy, qz, qw, zz))
+
+        qx_y, qy_y, qz_y, qw_y = self._pose_for_yaw(yaw)
+        _add_attempt("yaw", qx_y, qy_y, qz_y, qw_y, z)
+        _add_attempt("neutral_w1", 0.0, 0.0, 0.0, 1.0, z)
+        # 略抬高：减少奇异/关节限位导致的无解
+        z_up = float(z) + 0.05
+        _add_attempt("yaw_z+up", qx_y, qy_y, qz_y, qw_y, z_up)
+        _add_attempt("neutral_z+up", 0.0, 0.0, 0.0, 1.0, z_up)
+
+        last_err = None
+        for label, qx, qy, qz, qw, zz in attempts:
+            target = PoseStamped()
+            target.header.frame_id = "world"
+            target.pose.position.x = float(x)
+            target.pose.position.y = float(y)
+            target.pose.position.z = float(zz)
+            target.pose.orientation.x = qx
+            target.pose.orientation.y = qy
+            target.pose.orientation.z = qz
+            target.pose.orientation.w = qw
             self._moveit_arm.clear_pose_targets()
-            return False
-        try:
-            exec_result = self._moveit_arm.execute(traj, wait=True)
-            self._moveit_arm.stop()
-            self._moveit_arm.clear_pose_targets()
-            time.sleep(0.2)
-            # 旧版 MoveIt Python API execute() 可能返回 None（视为成功）
-            return exec_result if isinstance(exec_result, bool) else True
-        except Exception as e:
-            rospy.logwarn(f"[Env] execute 失败: {e}")
+            self._moveit_arm.set_pose_target(target, ee_link)
+            plan_ok, traj, plan_time, err = self._moveit_arm.plan()
+            last_err = (label, plan_ok, plan_time, err)
+            if not plan_ok:
+                rospy.logwarn(
+                    f"[Env] plan 失败 [{label}] pos=({x:.3f},{y:.3f},{zz:.3f}) "
+                    f"time={plan_time} err={err}")
+                continue
             try:
-                self._moveit_arm.stop()
+                exec_result = self._moveit_arm.execute(traj, wait=True)
                 self._moveit_arm.clear_pose_targets()
-            except Exception:
-                pass
-            return False
+                time.sleep(0.2)
+                ok_exec = exec_result if isinstance(exec_result, bool) else True
+                if not ok_exec:
+                    rospy.logwarn(f"[Env] execute 返回 False [{label}]")
+                return ok_exec
+            except Exception as e:
+                rospy.logwarn(f"[Env] execute 异常 [{label}]: {e}")
+                try:
+                    self._moveit_arm.stop()
+                    self._moveit_arm.clear_pose_targets()
+                except Exception:
+                    pass
+                return False
+
+        self._moveit_arm.clear_pose_targets()
+        if last_err:
+            rospy.logwarn(
+                f"[Env] _move_to_xy 全部尝试失败，最后: {last_err}")
+        return False
 
     def _attach_held_block_to_scene(self, color: str):
         if self._planning_scene is None or self._moveit_arm is None:
