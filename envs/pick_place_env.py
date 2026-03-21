@@ -80,8 +80,9 @@ MIN_OBJECT_CENTER_GAP = 0.12
 # 可达性约束（基于当前台面与机械臂安装关系的保守圆域）
 ARM_BASE_X = 0.28
 ARM_BASE_Y = 0.0
-ARM_REACH_MIN_R = 0.10
-ARM_REACH_MAX_R = 0.35
+# 经验可达环域（保守）：过近/过远位置在该机型上更容易触发规划超时
+ARM_REACH_MIN_R = 0.18
+ARM_REACH_MAX_R = 0.33
 
 # 首次 spawn 临时落点（远离桌面，避免与桌台重叠）
 SPAWN_PARK_X = 2.0
@@ -260,8 +261,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.set_max_velocity_scaling_factor(0.4)
         self._moveit_arm.set_max_acceleration_scaling_factor(0.4)
         self._moveit_arm.allow_replanning(True)
-        self._moveit_arm.set_planning_time(5.0)
-        self._moveit_arm.set_num_planning_attempts(8)
+        self._moveit_arm.set_planning_time(10.0)
+        self._moveit_arm.set_num_planning_attempts(12)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。

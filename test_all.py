@@ -288,16 +288,19 @@ def test_5_env_reset_step():
                              f"{d:.3f} m（应 ≥ 0.08 m）")
 
             # 可达性检查（若环境提供可达性函数）
+            # 注意：这里用 Gazebo GT 位姿，不用 obs 带噪声位姿，避免误报。
             if hasattr(env, "_is_reachable_xy"):
                 for i, c in enumerate(active):
-                    bp = block_pos[i]
-                    zp = bin_pos[i]
+                    bxyz = env._get_pose(f"{c}_block")
+                    zxyz = env._get_pose(f"{c}_bin")
+                    bp = bxyz[:2]
+                    zp = zxyz[:2]
                     if not env._is_reachable_xy(float(bp[0]), float(bp[1])):
                         unreachable_count += 1
-                        warn(f"  reset#{ridx+1} {c}_block 观测位置超出可达域: {bp}")
+                        warn(f"  reset#{ridx+1} {c}_block GT位置超出可达域: {bp}")
                     if not env._is_reachable_xy(float(zp[0]), float(zp[1])):
                         unreachable_count += 1
-                        warn(f"  reset#{ridx+1} {c}_bin   观测位置超出可达域: {zp}")
+                        warn(f"  reset#{ridx+1} {c}_bin   GT位置超出可达域: {zp}")
 
         if spacing_violations == 0:
             ok(f"{n_reset} 次 reset：桶间距检查通过（阈值 0.08m）")
@@ -343,8 +346,8 @@ def test_5_env_reset_step():
             warn("  这可能是因为正确颜色方块刚好距离 action 点更远（属于正常噪声）")
             warn("  多次运行或运行更多 episode 再判断")
 
-        # ── C. 闭环冒烟：pick -> place -> done ────────────────────────────
-        info("\n闭环冒烟测试（最多 3 回合）：pick->place->done")
+        # ── C. 闭环冒烟：单回合执行到 done/trunc，再进入下一回合 ─────────────
+        info("\n闭环冒烟测试（每回合执行到 done/trunc，最多 3 回合）")
         closed_loop_ok = 0
         closed_loop_trials = 3
         for k in range(closed_loop_trials):
@@ -353,44 +356,46 @@ def test_5_env_reset_step():
             pick_idx = active.index(info_dict.get("pick_color"))
             place_idx = active.index(info_dict.get("place_color"))
             na = env.n_active
+            pose_count = max(1, getattr(env, "pose_id_count", 1))
+            pose_cursor = 0
+            ep_done = False
+            ep_trunc = False
+            ep_steps = 0
+            while not (ep_done or ep_trunc):
+                ep_steps += 1
+                holding = getattr(env, "_holding_color", None)
+                if holding is None:
+                    # 未持物：持续尝试 pick，失败后切换下一个 pose_id
+                    pose_id = pose_cursor % pose_count
+                    pose_cursor += 1
+                    action = np.array(
+                        [0.0, float(pick_idx), float(pose_id), 0.0, 0.0],
+                        dtype=np.float32,
+                    )
+                    phase = f"pick pose_id={pose_id}"
+                else:
+                    # 已持物：执行 place
+                    pose_id = (pose_cursor - 1) % pose_count
+                    action = np.array(
+                        [1.0, float(na + place_idx), float(pose_id), 0.0, 0.0],
+                        dtype=np.float32,
+                    )
+                    phase = f"place pose_id={pose_id}"
 
-            pick_success = False
-            used_pose_id = 0
-            for pose_id in range(max(1, getattr(env, "pose_id_count", 1))):
-                a_pick = np.array(
-                    [0.0, float(pick_idx), float(pose_id), 0.0, 0.0],
-                    dtype=np.float32,
-                )
-                t_pick = time.time()
-                _, r_pick, done_pick, tr_pick, info_pick = env.step(a_pick)
-                info(f"  回合{k+1} pick pose_id={pose_id}  "
-                     f"success={info_pick.get('success')}  "
-                     f"done={done_pick} trunc={tr_pick}  "
-                     f"r={r_pick:.3f} ({time.time()-t_pick:.1f}s)")
-                if info_pick.get("success"):
-                    pick_success = True
-                    used_pose_id = pose_id
-                    break
-                _dump_recent_events(f"  回合{k+1} pick pose_id={pose_id} 失败阶段：", n=8)
+                t_step = time.time()
+                _, r_ep, ep_done, ep_trunc, info_ep = env.step(action)
+                info(f"  回合{k+1} step{ep_steps:02d} {phase:16s}  "
+                     f"success={info_ep.get('success')}  "
+                     f"done={ep_done} trunc={ep_trunc}  "
+                     f"r={r_ep:.3f} ({time.time()-t_step:.1f}s)")
+                if not info_ep.get("success"):
+                    _dump_recent_events(f"  回合{k+1} step{ep_steps:02d} 失败阶段：", n=8)
 
-            if not pick_success:
-                warn(f"  回合{k+1}：pick 未成功，跳过 place（用于暴露执行问题）")
-                continue
-
-            a_place = np.array(
-                [1.0, float(na + place_idx), float(used_pose_id), 0.0, 0.0],
-                dtype=np.float32,
-            )
-            t_place = time.time()
-            _, r_place, done_place, tr_place, info_place = env.step(a_place)
-            info(f"  回合{k+1} place  "
-                 f"success={info_place.get('success')}  "
-                 f"done={done_place} trunc={tr_place}  "
-                 f"r={r_place:.3f} ({time.time()-t_place:.1f}s)")
-            if not info_place.get("success"):
-                _dump_recent_events(f"  回合{k+1} place 失败阶段：", n=8)
-            if done_place:
+            if ep_done:
                 closed_loop_ok += 1
+                ok(f"  回合{k+1} 完成（done=True, steps={ep_steps}）")
+            else:
+                warn(f"  回合{k+1} 截断（trunc=True, steps={ep_steps}）")
 
         if closed_loop_ok > 0:
             ok(f"闭环冒烟通过：{closed_loop_ok}/{closed_loop_trials} 回合完成任务")
@@ -398,17 +403,22 @@ def test_5_env_reset_step():
             warn("闭环冒烟未通过：0 回合完成任务。若常见 TIMED_OUT/CONTROL_FAILED，"
                  "优先检查控制器参数与 MoveIt 执行链路。")
 
-        # 恢复原方法，避免影响其它测试
-        env._move_to_xy = _orig_move
-        env._open_gripper = _orig_open
-        env._close_gripper = _orig_close
-        env._execute_pick = _orig_pick
-        env._execute_place = _orig_place
-        env.close()
         # 允许把问题暴露为 warning，但如果核心结构性约束失败则判失败
         return spacing_violations == 0 and unreachable_count == 0
     except Exception as e:
         fail(f"失败: {e}"); traceback.print_exc(); return False
+    finally:
+        try:
+            # 恢复原方法，避免影响其它测试
+            if "env" in locals():
+                if "_orig_move" in locals(): env._move_to_xy = _orig_move
+                if "_orig_open" in locals(): env._open_gripper = _orig_open
+                if "_orig_close" in locals(): env._close_gripper = _orig_close
+                if "_orig_pick" in locals(): env._execute_pick = _orig_pick
+                if "_orig_place" in locals(): env._execute_place = _orig_place
+                env.close()
+        except Exception:
+            pass
 
 
 # ── Test 6: VLM 感知（真机可选） ─────────────────────────────────────────────
