@@ -114,24 +114,21 @@ SPAWN_PARK_Y0 = 0.0
 # ──────────────────────────────────────────────────────────
 # 坐标系约定（与 world 文件一致）：
 #   桌面顶面 z = 0.00（world文件桌面顶面在z=0）
-#   方块底面 z = 0.00，方块重心 z = BLOCK_H/2 = 0.02
+#   方块为 5cm 立方体：world 中方块底面 z≈0.001，重心 z≈0.026；逻辑上用 TABLE_Z+BLOCK_H/2
 #   桶底面   z = 0.00，桶重心   z = BIN_H/2   = 0.06
 #
 # GRASP_H 修正：
-#   原来 TABLE_Z + GRASP_H = 0.00 + 0.005 = 0.005m
-#   方块顶面在 z = TABLE_Z + BLOCK_H = 0.00 + 0.04 = 0.04m
-#   末端只到 0.025m，在桌面里，触发碰撞检测 → CONTROL_FAILED
-#   正确值：末端应到达方块中部稍上方
-#   TABLE_Z + GRASP_H = TABLE_Z + BLOCK_H/2 + 0.005 = 0.025m
-#   → GRASP_H = BLOCK_H/2 + 0.005 = 0.025m
+#   方块顶面在 z = TABLE_Z + BLOCK_H（5cm 立方体时 0.05m）
+#   末端目标约在方块中部附近：TABLE_Z + GRASP_H ≈ TABLE_Z + BLOCK_H/2 + 小裕量
+#   当前 GRASP_H=0.03 → TABLE_Z+0.03（可按 TCP 与水平侧抓再微调）
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
 #   TABLE_Z + APPROACH_H = 0.18m（高于桶顶2cm，便于抬起后验证）
 # ──────────────────────────────────────────────────────────
 TABLE_Z       = 0.00   # 桌面顶面（world文件里桌面顶面在 z=0）
-BLOCK_H       = 0.04   # 方块高度
-BLOCK_W       = 0.05   # 方块边长（x/y）
+BLOCK_H       = 0.05   # 方块高度（与 world 中 5cm 立方体一致）
+BLOCK_W       = 0.05   # 方块边长（x/y，立方体）
 BIN_H         = 0.12   # 垃圾桶高度（外高）
 BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
@@ -175,7 +172,8 @@ POSITION_NOISE_SIGMA = 0.030   # 稍微降低噪声，6→3颜色后精度可以
 # MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
 MOVEIT_ARM_HOME_STATE = "home"
 MOVEIT_GRIPPER_OPEN_STATE = "open"
-MOVEIT_GRIPPER_CLOSE_STATE = "close"
+# 抓取时用 middle：完全 close 时两指贴死，无法容纳 5cm 方块且易弹飞；与实验示例一致
+MOVEIT_GRIPPER_GRASP_STATE = "middle"
 
 # Gazebo模型名称约定：{color}_block, {color}_bin
 def block_name(color: str) -> str: return f"{color}_block"
@@ -426,7 +424,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                 p.pose.position.y = float(bxyz[1])
                 p.pose.position.z = float(bxyz[2])
                 p.pose.orientation.w = 1.0
-                self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.04))
+                self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.05))
 
         for c in self._active_bin_colors:
             zyz = self._get_pose(bin_name(c))
@@ -906,7 +904,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         time.sleep(0.3)
 
     def _close_gripper(self):
-        self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_CLOSE_STATE)
+        """夹持方块：使用 SRDF `middle`，非 `close`（完全闭合无法容纳方块宽度）。"""
+        self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_GRASP_STATE)
         self._moveit_gripper.go(wait=True)
         self._gripper_open = False
         time.sleep(0.3)
@@ -1034,7 +1033,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             p.pose.position.y = 0.0
             p.pose.position.z = 0.0
             p.pose.orientation.w = 1.0
-            self._planning_scene.attach_box(ee, block_name(color), p, (0.05, 0.05, 0.04))
+            self._planning_scene.attach_box(ee, block_name(color), p, (0.05, 0.05, 0.05))
         except Exception as e:
             rospy.logwarn(f"[Env] attach_box 失败 {color}: {e}")
 

@@ -229,7 +229,7 @@ def test_5_env_reset_step():
         def _close_diag(*args, **kwargs):
             t0 = time.time()
             _orig_close(*args, **kwargs)
-            _append_event("gripper:close", True, time.time() - t0)
+            _append_event("gripper:grasp(middle)", True, time.time() - t0)
 
         def _pick_diag(x, y, color, pose_id):
             # pick_place_env：水平抓取 + yaw=atan2，pose_id 不参与末端朝向（动作兼容维）

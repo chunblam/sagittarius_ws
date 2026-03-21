@@ -7,17 +7,17 @@
     2. 垃圾桶从圆柱体改为空心带底长方体（与实验室实物一致）
     3. 高度层级重新设计，避免物体重叠产生阴影：
          桌面顶面      z = 0.000
-         方块底面      z = 0.001（紧贴桌面，重心 z=0.021）
+         方块底面      z = 0.001（紧贴桌面，5cm 立方体重心 z=0.026）
          桶底面        z = 0.001（紧贴桌面，重心 z=0.060）
          桌体本体      pose z = -0.025（桌厚5cm，顶面恰好在 z=0）
-    4. 物体实物尺寸（参照 Lab2 图片）：
-         方块：5cm × 5cm × 4cm（彩色泡沫/塑料方块）
+    4. 物体实物尺寸（参照 Lab2 / 竞赛用 EVA 泡沫）：
+         方块：5cm × 5cm × 5cm 立方体（彩色 EVA，哑光、软接触参数）
          垃圾桶：外7cm×7cm×12cm，壁厚+底厚各0.25cm，内空6.5cm×6.5cm×11.75cm
     5. 空心桶用 5 个 box 拼合（底板 + 四面墙）
     6. 桶声明为 static=false，可与方块一样参与随机位置与物理碰撞
     7. 命名约定：{color}_block / {color}_bin
     8. 本文件只包含物体模型，不含 ground/sun/physics 配置
-  9. 质量：方块约 40g、空桶约 220g（略重于早期 12g/160g，减轻 ODE 接触下数值抖动）
+  9. 质量：方块约 25g（EVA 泡沫密度约 32kg/m³ 量级）、空桶约 220g
 
   如何使用：
     把本文件里所有 <model> 标签复制进你现有的 world 文件的 <world> 标签内。
@@ -50,121 +50,145 @@
   </model>
 
   <!-- ════════════════════════════════════════════════════
-       彩色方块（5cm × 5cm × 4cm）
+       彩色方块（5cm 立方体，EVA 泡沫竞赛块）
        spawn 位置只是初始位置，训练时每 episode 随机传送。
-       pose z=0.021 = TABLE_Z(0.001) + BLOCK_H/2(0.02)
+       pose z=0.026 = 底面 z(0.001) + 半边长(0.025)
   ════════════════════════════════════════════════════ -->
-
+  <!-- 方块碰撞/视觉共用：EVA — 哑光、低弹性、略软接触（mu 适中、kp 略低、soft_cfm 略大） -->
   <model name="red_block">
-    <pose>0.18 -0.12 0.021 0 0 0</pose>
+    <pose>0.18 -0.12 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.90 0.10 0.10 1</ambient><diffuse>0.90 0.10 0.10 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.90 0.10 0.10 1</ambient>
+          <diffuse>0.88 0.12 0.12 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
 
   <model name="green_block">
-    <pose>0.22 -0.04 0.021 0 0 0</pose>
+    <pose>0.22 -0.04 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.10 0.80 0.15 1</ambient><diffuse>0.10 0.80 0.15 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.10 0.80 0.15 1</ambient>
+          <diffuse>0.12 0.78 0.18 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
 
   <model name="blue_block">
-    <pose>0.18 0.06 0.021 0 0 0</pose>
+    <pose>0.18 0.06 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.10 0.20 0.90 1</ambient><diffuse>0.10 0.20 0.90 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.10 0.20 0.90 1</ambient>
+          <diffuse>0.12 0.22 0.88 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
 
   <model name="yellow_block">
-    <pose>0.24 0.14 0.021 0 0 0</pose>
+    <pose>0.24 0.14 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.95 0.90 0.05 1</ambient><diffuse>0.95 0.90 0.05 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.95 0.90 0.05 1</ambient>
+          <diffuse>0.92 0.88 0.10 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
 
   <model name="pink_block">
-    <pose>0.20 -0.16 0.021 0 0 0</pose>
+    <pose>0.20 -0.16 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.95 0.40 0.70 1</ambient><diffuse>0.95 0.40 0.70 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.95 0.40 0.70 1</ambient>
+          <diffuse>0.90 0.42 0.68 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
 
   <model name="orange_block">
-    <pose>0.26 0.00 0.021 0 0 0</pose>
+    <pose>0.26 0.00 0.026 0 0 0</pose>
     <link name="link">
       <inertial>
-        <mass>0.04</mass>
-        <inertia><ixx>4.7e-5</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>4.7e-5</iyy><iyz>0</iyz><izz>7.0e-5</izz></inertia>
+        <mass>0.025</mass>
+        <inertia><ixx>1.042e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1.042e-5</iyy><iyz>0</iyz><izz>1.042e-5</izz></inertia>
       </inertial>
       <visual name="v">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <material><ambient>0.95 0.50 0.05 1</ambient><diffuse>0.95 0.50 0.05 1</diffuse></material>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <material>
+          <ambient>0.95 0.50 0.05 1</ambient>
+          <diffuse>0.90 0.48 0.10 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular>
+        </material>
       </visual>
       <collision name="c">
-        <geometry><box><size>0.05 0.05 0.04</size></box></geometry>
-        <surface><friction><ode><mu>1.1</mu><mu2>1.1</mu2></ode></friction><bounce><restitution_coefficient>0.02</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0008</soft_cfm><soft_erp>0.35</soft_erp><kp>8000</kp><kd>45</kd><max_vel>0.15</max_vel><min_depth>0.0015</min_depth></ode></contact></surface>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+        <surface><friction><ode><mu>0.75</mu><mu2>0.75</mu2></ode></friction><bounce><restitution_coefficient>0.03</restitution_coefficient><threshold>1e6</threshold></bounce><contact><ode><soft_cfm>0.0025</soft_cfm><soft_erp>0.32</soft_erp><kp>4500</kp><kd>38</kd><max_vel>0.12</max_vel><min_depth>0.002</min_depth></ode></contact></surface>
       </collision>
     </link>
   </model>
