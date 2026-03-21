@@ -11,6 +11,7 @@
   LLM_* / VLM_*（各 3 个）— 见下方常量名
   EXPLORELLM_MOVEIT_NS — 机器人/MoveIt 所在 ROS 命名空间（默认 sgr532）
   EXPLORELLM_MOVEIT_WAIT — 连接 move_group action 超时秒数（默认 30）
+  EXPLORELLM_MOVEIT_PLANNING_TIME_S — 单次 OMPL 规划时间上限（秒，默认 8，与 pick_place_env 一致）
   EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL — MoveIt 回 home 失败后是否调用
       /gazebo/reset_simulation 恢复物理（默认 1，训练推荐；无 Gazebo 时自动跳过）
 """
@@ -42,6 +43,7 @@ DEFAULT_VLM_MODEL = "qwen-vl"
 # Sagittarius Gazebo 常见 launch：参数在 /sgr532/robot_description，move_group 在 /sgr532/move_group
 MOVEIT_NS_ENV = "EXPLORELLM_MOVEIT_NS"
 MOVEIT_WAIT_ENV = "EXPLORELLM_MOVEIT_WAIT"
+MOVEIT_PLANNING_TIME_ENV = "EXPLORELLM_MOVEIT_PLANNING_TIME_S"
 GAZEBO_RESET_SIM_ON_HOME_FAIL_ENV = "EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL"
 DEFAULT_MOVEIT_NS = "sgr532"
 DEFAULT_MOVEIT_WAIT_S = 30.0
@@ -92,6 +94,21 @@ def moveit_commander_ns() -> str:
     if s.lower() in ("", "/", ".", "root", "none", "~", "global"):
         return ""
     return s.strip("/")
+
+
+def moveit_planning_time_s() -> float:
+    """
+    单次 MoveIt plan() 的 OMPL 时间上限（秒）。
+    默认 8.0；可通过 EXPLORELLM_MOVEIT_PLANNING_TIME_S 覆盖（例如 4 加快失败、12 提高难场景成功率）。
+    """
+    raw = os.environ.get(MOVEIT_PLANNING_TIME_ENV, "").strip()
+    if not raw:
+        return 8.0
+    try:
+        t = float(raw)
+        return max(0.5, min(t, 120.0))
+    except ValueError:
+        return 8.0
 
 
 def moveit_robot_description_param() -> str:

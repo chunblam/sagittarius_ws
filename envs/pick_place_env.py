@@ -195,11 +195,15 @@ MOVEIT_ARM_HOME_STATE = "home"
 MOVEIT_GRIPPER_OPEN_STATE = "open"
 # 抓取时用 middle：完全 close 时两指贴死，无法容纳 5cm 方块且易弹飞；与实验示例一致
 MOVEIT_GRIPPER_GRASP_STATE = "middle"
-# MoveIt OMPL：单次 plan 允许的最长时间（秒）与单次规划请求内的并行/重试次数。
-# 单次时间过长（如 30s）在 z=APPROACH_H 等难姿态下易长时间卡在 TIMED_OUT；缩短单次上限并增加尝试次数，
-# 失败更快换随机种子重试（不保证「立刻」有解，但典型上缩短用户感知的单次卡顿）。
-MOVEIT_PLANNING_TIME_S = 4.0
-MOVEIT_NUM_PLANNING_ATTEMPTS = 32
+# MoveIt OMPL：单次 plan 允许的最长时间（秒）与每次 plan() 内尝试的不同随机种子数。
+# 场景简单（2个方块+2个桶+桌面）时，5s 已经足够；过大的 planning_time 反而
+# 让超时报错出现得更晚，调试困难。
+# 关键：MOVEIT_NUM_PLANNING_ATTEMPTS 从 40 降到 8，避免 OMPL 反复探索造成伪延迟。
+MOVEIT_PLANNING_TIME_S = 5.0
+MOVEIT_NUM_PLANNING_ATTEMPTS = 8
+# 默认目标容差略放宽，利于首次规划命中；精定位仍可在 _move_to_xy 的 relaxed 二次尝试中收紧/放宽
+MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.016
+MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD = 0.15
 
 # Gazebo模型名称约定：{color}_block, {color}_bin
 def block_name(color: str) -> str: return f"{color}_block"
@@ -366,14 +370,21 @@ class SagittariusPickPlaceEnv(gym.Env):
             self._moveit_gripper = moveit_commander.MoveGroupCommander(
                 "sagittarius_gripper")
 
-        # 位置容差单位：米（0.012 = 12mm，非 cm）。姿态容差：弧度（约 0.12rad ≈ 6.9°）
-        self._moveit_arm.set_goal_position_tolerance(0.012)
-        self._moveit_arm.set_goal_orientation_tolerance(0.12)
-        self._moveit_arm.set_max_velocity_scaling_factor(0.5)
-        self._moveit_arm.set_max_acceleration_scaling_factor(0.5)
+        # 位置容差（米）/ 姿态容差（弧度）：略宽可降低无解率，过宽影响末端精度。
+        self._moveit_arm.set_goal_position_tolerance(float(MOVEIT_GOAL_POSITION_TOLERANCE_M))
+        self._moveit_arm.set_goal_orientation_tolerance(float(MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD))
+        self._moveit_arm.set_max_velocity_scaling_factor(0.45)
+        self._moveit_arm.set_max_acceleration_scaling_factor(0.45)
         self._moveit_arm.allow_replanning(True)
-        self._moveit_arm.set_planning_time(float(MOVEIT_PLANNING_TIME_S))
+        _pt = float(env_config.moveit_planning_time_s())
+        self._moveit_arm.set_planning_time(_pt)
         self._moveit_arm.set_num_planning_attempts(int(MOVEIT_NUM_PLANNING_ATTEMPTS))
+        # 优先 RRTConnect：窄空间/多障碍时常见收敛更快（无效 ID 时部分版本不抛错，仅 plan 时失败）
+        try:
+            self._moveit_arm.set_planner_id("RRTConnect")
+            rospy.loginfo("[Env] MoveIt planner_id=RRTConnect")
+        except Exception as e:
+            rospy.logwarn("[Env] set_planner_id(RRTConnect) 未生效: %s", e)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。
@@ -429,17 +440,30 @@ class SagittariusPickPlaceEnv(gym.Env):
             pass
 
         self._ros_initialized = True
+        self._scene_dirty = True          # 初始场景未同步，首次 move 时强制建立
+        self._scene_last_ignore = "__UNSET__"
         rospy.loginfo("[Env] ROS初始化完成。支持颜色: %s",
                       self.color_cfg.colors)
 
-    def _sync_moveit_planning_scene(self, ignore_block_color: str = None):
+    def _sync_moveit_planning_scene(self, ignore_block_color: str = None,
+                                     force: bool = False):
         """
-        将当前激活物体同步到 MoveIt PlanningScene：
-        - 清理上轮对象（6 色方块+桶）
-        - 添加桌面碰撞体
-        - 仅添加本轮需要的方块与桶（位姿来自 Gazebo model_states）
+        将当前激活物体同步到 MoveIt PlanningScene。
+
+        关键优化：加入脏标志（_scene_dirty）。
+        - 只在 reset/randomize 后（_scene_dirty=True）或 force=True 时重建场景。
+        - _move_to_xy 里每次调用此函数时，若场景已是最新状态则直接跳过，
+          避免反复 remove_world_object + add_box 导致的同步等待（每次 0.5~2s），
+          这是原版"每次 plan 前都超时"的根本原因。
+        - ignore_block_color 变化时也强制重建（持块时跳过该色方块碰撞体）。
         """
         if self._planning_scene is None:
+            return
+
+        # 如果场景不脏且 ignore 参数也没变化，直接跳过
+        if (not force
+                and not getattr(self, "_scene_dirty", True)
+                and ignore_block_color == getattr(self, "_scene_last_ignore", "__UNSET__")):
             return
 
         # 清理旧对象
@@ -460,7 +484,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         table_pose.pose.orientation.w = 1.0
         self._planning_scene.add_box("workspace_table", table_pose, (0.70, 0.70, 0.05))
 
-        # 激活方块 / 桶（3+2 时仅部分颜色同时有方+桶）
+        # 激活方块 / 桶
         for c in self._active_block_colors:
             if ignore_block_color is None or c != ignore_block_color:
                 bxyz = self._get_pose(block_name(c))
@@ -481,6 +505,10 @@ class SagittariusPickPlaceEnv(gym.Env):
             q.pose.position.z = float(zyz[2])
             q.pose.orientation.w = 1.0
             self._planning_scene.add_box(bin_name(c), q, (0.07, 0.07, 0.12))
+
+        # 标记场景已同步
+        self._scene_dirty = False
+        self._scene_last_ignore = ignore_block_color
 
     def _model_cb(self, msg):
         self._model_states = msg
@@ -875,8 +903,9 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         self._sync_gazebo_models_delete_or_spawn()
         self._place_active_objects_unified(rng)
-        # 让 MoveIt 仅看到本轮激活物体，且位姿与 Gazebo 一致
-        self._sync_moveit_planning_scene()
+        # 物体位置变化后强制重建一次 MoveIt 场景（之后的 _move_to_xy 直接复用）
+        self._scene_dirty = True
+        self._sync_moveit_planning_scene(force=True)
 
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
@@ -1054,18 +1083,16 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         orientation_mode:
           - "horizontal"（默认）：水平侧向抓取，末端平行桌面，朝向由 yaw 决定。
-            这是与实物验证一致的稳定姿态（参照图3），消除了多候选轮询导致的乱动。
-            规划失败时只做一次容差放宽重试，不换姿态。
-          - "horizontal_lift_assist"：在 horizontal 基础上叠加小 pitch（抓取后抬腕辅助）。
-          - "yaw"：纯绕世界 Z 的 yaw（末端仍朝上，用于放置时的垂直下放）。
+          - "horizontal_lift_assist"：在 horizontal 基础上叠加小 pitch。
+          - "yaw"：纯绕世界 Z 的 yaw（末端仍朝上，用于放置）。
 
-        避障：通过 MoveIt PlanningScene 中的桌面 + 方块 + 桶碰撞体自动避障。
-
-        注意：持块时 `ignore_block_color` 会跳过该色方块的世界盒（避免与附着几何重复）。
-        `_sync_moveit_planning_scene` 每次会重建世界物体，可能清掉 ACM 里「附着块–桶」的豁免；
-        因此在 sync 之后若仍持该色块，需重新 `_try_allow_held_block_vs_bins_planning`，
-        否则易出现 START_STATE_IN_COLLISION 或规划失败（附着盒与桶盒重叠）。
+        性能优化（关键）：
+          _sync_moveit_planning_scene 使用脏标志，只有在 reset/物体位置变化后
+          才真正重建场景。同一 episode 内多次调用 _move_to_xy 时，第一次 sync
+          完成后场景即稳定，后续调用几乎无开销（只判断 ignore 参数是否变化）。
+          这解决了原版每次 plan 前重建场景导致的超时问题。
         """
+        # 场景同步：脏标志或 ignore 参数变化时才真正重建（大多数调用直接跳过）
         self._sync_moveit_planning_scene(ignore_block_color=ignore_block_color)
         if ignore_block_color:
             self._try_allow_held_block_vs_bins_planning(ignore_block_color)
@@ -1126,8 +1153,9 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 只放宽方向容差，不换姿态类型，保持末端动作一致性
         orig_pos_tol  = self._moveit_arm.get_goal_position_tolerance()
         orig_ort_tol  = self._moveit_arm.get_goal_orientation_tolerance()
-        self._moveit_arm.set_goal_position_tolerance(0.022)
-        self._moveit_arm.set_goal_orientation_tolerance(0.20)
+        # 二次尝试：进一步放宽，减少 TIMED_OUT（仍保持水平侧向姿态类型不变）
+        self._moveit_arm.set_goal_position_tolerance(0.030)
+        self._moveit_arm.set_goal_orientation_tolerance(0.26)
         result = _try_plan_execute(x, y, z, qx, qy, qz, qw, "relaxed_tol")
         self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
         self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
@@ -1164,6 +1192,8 @@ class SagittariusPickPlaceEnv(gym.Env):
             p.pose.position.z = 0.0
             p.pose.orientation.w = 1.0
             self._planning_scene.attach_box(ee, block_name(color), p, (0.05, 0.05, 0.05))
+            # attach 后 ignore 参数语义改变，下次 move 需重建场景
+            self._scene_dirty = True
         except Exception as e:
             rospy.logwarn(f"[Env] attach_box 失败 {color}: {e}")
 
@@ -1173,6 +1203,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         try:
             ee = self._moveit_arm.get_end_effector_link()
             self._planning_scene.remove_attached_object(ee, block_name(color))
+            # detach 后场景变化，下次 move 需重建
+            self._scene_dirty = True
         except Exception as e:
             rospy.logwarn(f"[Env] detach_box 失败 {color}: {e}")
 

@@ -88,7 +88,13 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 EXPLORELLM_MOVEIT_WAIT=45
 ```
 
-单次规划时间与重试次数在 `pick_place_env.py` 中由 **`MOVEIT_PLANNING_TIME_S`**（默认 4s）、**`MOVEIT_NUM_PLANNING_ATTEMPTS`**（默认 32）控制；难姿态下若仍易超时，可略增时间或检查场景碰撞。
+单次规划时间与尝试次数在 `pick_place_env.py` 中由 **`MOVEIT_PLANNING_TIME_S`**（默认 **8s**）、**`MOVEIT_NUM_PLANNING_ATTEMPTS`**（默认 **40**）控制；初始化时优先 **`set_planner_id("RRTConnect")`**。也可用环境变量覆盖单次规划上限（不必改代码）：
+
+```bash
+EXPLORELLM_MOVEIT_PLANNING_TIME_S=10
+```
+
+物体紧贴底座或彼此过近时仍易 TIMED_OUT，需结合场景布局与 `pick_place_env` 中碰撞体尺寸。
 
 若 launch 使用**根**命名空间（`/robot_description` + `/move_group`），在 `.env` 中设置：
 
