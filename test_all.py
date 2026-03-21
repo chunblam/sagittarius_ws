@@ -162,84 +162,180 @@ def test_4_color_config():
 
 # ── Test 5: 环境 reset/step ───────────────────────────────────────────────────
 def test_5_env_reset_step():
-    section("Test 5: 环境 reset() 和 step()（含奖励结构 & 桶不重叠验证）")
+    section("Test 5: 环境综合体检（reset稳定性 + 奖励方向 + 闭环冒烟）")
     try:
+        import envs.pick_place_env as ppe_mod
         from envs.pick_place_env import SagittariusPickPlaceEnv
         from config.color_config import get_color_config
         import numpy as np
 
         cfg = get_color_config()
-        env = SagittariusPickPlaceEnv(task="short_horizon", max_steps=3)
+        env = SagittariusPickPlaceEnv(task="short_horizon", max_steps=8)
         na  = env.n_active
         ok("环境创建成功")
         ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=5")
 
-        t0 = time.time()
-        obs, info_dict = env.reset()
-        active = list(info_dict.get("active_colors", env._active_colors))
-        ok(f"reset() 成功 ({time.time()-t0:.1f}s)  "
-           f"pick={info_dict.get('pick_color')}, "
-           f"place={info_dict.get('place_color')}  "
-           f"active={active}")
+        # ── 动作分阶段诊断（用于定位 TIMED_OUT/CONTROL_FAILED 发生在哪一步） ──
+        diag = {"events": []}
+        _orig_move = env._move_to_xy
+        _orig_open = env._open_gripper
+        _orig_close = env._close_gripper
+        _orig_pick = env._execute_pick
+        _orig_place = env._execute_place
 
-        if obs.shape[0] != env.obs_dim:
-            fail(f"obs 维度 {obs.shape[0]} ≠ {env.obs_dim}"); return False
-        ok(f"  obs 维度正确: {env.obs_dim}")
+        def _classify_move_stage(z_abs: float) -> str:
+            z_rel = float(z_abs - ppe_mod.TABLE_Z)
+            if abs(z_rel - ppe_mod.APPROACH_H) <= 0.02:
+                return "approach/lift"
+            if abs(z_rel - (ppe_mod.BLOCK_H + ppe_mod.PRE_GRASP_CLEAR_Z)) <= 0.02:
+                return "pre_grasp_down"
+            if abs(z_rel - ppe_mod.GRASP_H) <= 0.02:
+                return "grasp_down"
+            if abs(z_rel - ppe_mod.PLACE_H) <= 0.02:
+                return "place_down"
+            return f"move_z={z_rel:.3f}"
 
-        img_dim = na * 3 * 28 * 28
-        block_pos = obs[img_dim : img_dim + na * 2].reshape(na, 2)
-        bin_pos   = obs[img_dim + na * 2 : img_dim + na * 4].reshape(na, 2)
+        def _append_event(name: str, ok_flag: bool, dt: float, extra: str = ""):
+            diag["events"].append({
+                "name": name, "ok": bool(ok_flag), "dt": float(dt), "extra": extra
+            })
 
-        info(f"  方块位置[0] ({active[0]}): {block_pos[0]}")
-        info(f"  桶位置[0]   ({active[0]}): {bin_pos[0]}")
+        def _dump_recent_events(prefix: str, n: int = 10):
+            info(prefix)
+            recent = diag["events"][-n:]
+            if not recent:
+                info("  （无阶段记录）")
+                return
+            for i, e in enumerate(recent, 1):
+                state = "OK" if e["ok"] else "FAIL"
+                info(f"  {i:02d}. {e['name']:18s} {state:4s}  {e['dt']:.2f}s  {e['extra']}")
 
-        if np.all(block_pos == 0):
-            warn("方块位置全是 0，检查 Gazebo 物体是否加载")
-        if np.all(bin_pos == 0):
-            warn("桶位置全是 0，检查 Gazebo 桶模型是否加载")
+        def _move_diag(x, y, z, *args, **kwargs):
+            t0 = time.time()
+            ok_flag = _orig_move(x, y, z, *args, **kwargs)
+            dt = time.time() - t0
+            tag = _classify_move_stage(float(z))
+            extra = f"(x={float(x):.3f},y={float(y):.3f},z={float(z):.3f})"
+            if dt > 4.0 and not ok_flag:
+                extra += " [suspect timeout]"
+            _append_event(f"move:{tag}", ok_flag, dt, extra)
+            return ok_flag
 
-        # ── 检查垃圾桶是否互不重叠 ────────────────────────────────────────
-        info("检查垃圾桶位置是否互不重叠（最小间距应 ≥ 0.08 m）...")
-        overlap_found = False
-        for i in range(na):
-            for j in range(i + 1, na):
-                d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
-                if d < 0.08:   # 低于安全阈值（8cm）
-                    fail(f"  桶 {active[i]} 与 {active[j]} 距离过近: "
-                         f"{d:.3f} m（应 ≥ 0.08 m）")
-                    overlap_found = True
-        if not overlap_found:
-            ok(f"  所有 {na} 个激活垃圾桶位置互不重叠 ✓")
+        def _open_diag(*args, **kwargs):
+            t0 = time.time()
+            _orig_open(*args, **kwargs)
+            _append_event("gripper:open", True, time.time() - t0)
+
+        def _close_diag(*args, **kwargs):
+            t0 = time.time()
+            _orig_close(*args, **kwargs)
+            _append_event("gripper:close", True, time.time() - t0)
+
+        def _pick_diag(x, y, color, pose_id):
+            _append_event("pick:start", True, 0.0, f"color={color}, pose_id={pose_id}")
+            t0 = time.time()
+            ok_flag = _orig_pick(x, y, color, pose_id)
+            _append_event("pick:end", ok_flag, time.time() - t0)
+            return ok_flag
+
+        def _place_diag(x, y, pose_id):
+            _append_event("place:start", True, 0.0, f"pose_id={pose_id}")
+            t0 = time.time()
+            ok_flag = _orig_place(x, y, pose_id)
+            _append_event("place:end", ok_flag, time.time() - t0)
+            return ok_flag
+
+        env._move_to_xy = _move_diag
+        env._open_gripper = _open_diag
+        env._close_gripper = _close_diag
+        env._execute_pick = _pick_diag
+        env._execute_place = _place_diag
+
+        # ── A. reset稳定性与随机场景体检（多次）────────────────────────────
+        n_reset = 3
+        spacing_violations = 0
+        unreachable_count = 0
+        info(f"执行 {n_reset} 次 reset 场景体检...")
+        for ridx in range(n_reset):
+            t0 = time.time()
+            obs, info_dict = env.reset()
+            active = list(info_dict.get("active_colors", env._active_colors))
+            ok(f"  reset#{ridx+1} ({time.time()-t0:.1f}s)  "
+               f"pick={info_dict.get('pick_color')} -> place={info_dict.get('place_color')}  "
+               f"active={active}")
+
+            if obs.shape[0] != env.obs_dim:
+                fail(f"obs 维度 {obs.shape[0]} ≠ {env.obs_dim}")
+                env.close()
+                return False
+
+            img_dim = na * 3 * 28 * 28
+            block_pos = obs[img_dim : img_dim + na * 2].reshape(na, 2)
+            bin_pos   = obs[img_dim + na * 2 : img_dim + na * 4].reshape(na, 2)
+
+            if np.all(block_pos == 0):
+                warn("  方块位置全是 0，检查 Gazebo 物体是否加载")
+            if np.all(bin_pos == 0):
+                warn("  桶位置全是 0，检查 Gazebo 桶模型是否加载")
+
+            # 桶间距检查（8cm）
+            for i in range(na):
+                for j in range(i + 1, na):
+                    d = float(np.linalg.norm(bin_pos[i] - bin_pos[j]))
+                    if d < 0.08:
+                        spacing_violations += 1
+                        warn(f"  reset#{ridx+1} 桶 {active[i]} 与 {active[j]} 距离过近: "
+                             f"{d:.3f} m（应 ≥ 0.08 m）")
+
+            # 可达性检查（若环境提供可达性函数）
+            if hasattr(env, "_is_reachable_xy"):
+                for i, c in enumerate(active):
+                    bp = block_pos[i]
+                    zp = bin_pos[i]
+                    if not env._is_reachable_xy(float(bp[0]), float(bp[1])):
+                        unreachable_count += 1
+                        warn(f"  reset#{ridx+1} {c}_block 观测位置超出可达域: {bp}")
+                    if not env._is_reachable_xy(float(zp[0]), float(zp[1])):
+                        unreachable_count += 1
+                        warn(f"  reset#{ridx+1} {c}_bin   观测位置超出可达域: {zp}")
+
+        if spacing_violations == 0:
+            ok(f"{n_reset} 次 reset：桶间距检查通过（阈值 0.08m）")
         else:
-            warn("  存在桶重叠，请检查 _randomize_scene 是否使用了新版代码")
+            warn(f"{n_reset} 次 reset：发现 {spacing_violations} 次桶间距过近")
+        if unreachable_count == 0:
+            ok(f"{n_reset} 次 reset：物体位置均在可达域内")
+        else:
+            warn(f"{n_reset} 次 reset：发现 {unreachable_count} 个观测点疑似不可达")
 
-        # ── 打印桶的具体坐标 ──────────────────────────────────────────────
-        info("桶的具体位置：")
-        for i, c in enumerate(active):
-            info(f"  {c:10s}_bin : ({bin_pos[i, 0]:.3f}, {bin_pos[i, 1]:.3f})")
+        # 使用最后一次 reset 的状态做 step 检查
+        active = list(info_dict.get("active_colors", env._active_colors))
+        pick_color = info_dict.get("pick_color")
+        place_color = info_dict.get("place_color")
+        info(f"用于 step 检查: pick={pick_color}, place={place_color}, active={active}")
 
-        # ── step 测试：pick 正确颜色（obj_index 为 _active_colors 局部下标）──
-        info("\n调用 env.step()（pick 正确颜色方块，约 10-20 秒）...")
-        pick_idx = active.index(info_dict.get("pick_color"))
+        # ── B. 奖励方向检查：正确 pick vs 错误 pick ───────────────────────
+        info("\n奖励方向检查：正确 pick vs 错误 pick")
+        pick_idx = active.index(pick_color)
         action_correct = np.array(
             [0.0, float(pick_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
         obs2, r_correct, done, trunc, info2 = env.step(action_correct)
-        ok(f"step() 正确颜色  reward={r_correct:.4f}  "
+        ok(f"  正确颜色 pick: reward={r_correct:.4f}  "
            f"success={info2.get('success')}  ({time.time()-t0:.1f}s)")
+        if not info2.get("success"):
+            _dump_recent_events("  正确 pick 失败，最近阶段记录：")
 
-        # ── step 测试：pick 错误颜色（应得到更低 reward） ─────────────────
-        info("调用 env.step()（pick 错误颜色方块，约 10-20 秒）...")
         wrong_idx = (pick_idx + 1) % na   # 选一个不同的激活颜色
         action_wrong = np.array(
             [0.0, float(wrong_idx), 0.0, 0.0, 0.0], dtype=np.float32)
         t0 = time.time()
         obs3, r_wrong, done2, trunc2, info3 = env.step(action_wrong)
-        ok(f"step() 错误颜色  reward={r_wrong:.4f}  "
+        ok(f"  错误颜色 pick: reward={r_wrong:.4f}  "
            f"success={info3.get('success')}  ({time.time()-t0:.1f}s)")
+        if not info3.get("success"):
+            _dump_recent_events("  错误 pick 失败，最近阶段记录：")
 
-        # ── 验证奖励结构正确性 ────────────────────────────────────────────
-        info("奖励结构验证（错误颜色的奖励应 ≤ 正确颜色的奖励）：")
         if r_wrong <= r_correct:
             ok(f"  奖励结构正确：错误颜色 {r_wrong:.4f} ≤ 正确颜色 {r_correct:.4f}")
         else:
@@ -247,8 +343,70 @@ def test_5_env_reset_step():
             warn("  这可能是因为正确颜色方块刚好距离 action 点更远（属于正常噪声）")
             warn("  多次运行或运行更多 episode 再判断")
 
+        # ── C. 闭环冒烟：pick -> place -> done ────────────────────────────
+        info("\n闭环冒烟测试（最多 3 回合）：pick->place->done")
+        closed_loop_ok = 0
+        closed_loop_trials = 3
+        for k in range(closed_loop_trials):
+            obs, info_dict = env.reset()
+            active = list(info_dict.get("active_colors", env._active_colors))
+            pick_idx = active.index(info_dict.get("pick_color"))
+            place_idx = active.index(info_dict.get("place_color"))
+            na = env.n_active
+
+            pick_success = False
+            used_pose_id = 0
+            for pose_id in range(max(1, getattr(env, "pose_id_count", 1))):
+                a_pick = np.array(
+                    [0.0, float(pick_idx), float(pose_id), 0.0, 0.0],
+                    dtype=np.float32,
+                )
+                t_pick = time.time()
+                _, r_pick, done_pick, tr_pick, info_pick = env.step(a_pick)
+                info(f"  回合{k+1} pick pose_id={pose_id}  "
+                     f"success={info_pick.get('success')}  "
+                     f"done={done_pick} trunc={tr_pick}  "
+                     f"r={r_pick:.3f} ({time.time()-t_pick:.1f}s)")
+                if info_pick.get("success"):
+                    pick_success = True
+                    used_pose_id = pose_id
+                    break
+                _dump_recent_events(f"  回合{k+1} pick pose_id={pose_id} 失败阶段：", n=8)
+
+            if not pick_success:
+                warn(f"  回合{k+1}：pick 未成功，跳过 place（用于暴露执行问题）")
+                continue
+
+            a_place = np.array(
+                [1.0, float(na + place_idx), float(used_pose_id), 0.0, 0.0],
+                dtype=np.float32,
+            )
+            t_place = time.time()
+            _, r_place, done_place, tr_place, info_place = env.step(a_place)
+            info(f"  回合{k+1} place  "
+                 f"success={info_place.get('success')}  "
+                 f"done={done_place} trunc={tr_place}  "
+                 f"r={r_place:.3f} ({time.time()-t_place:.1f}s)")
+            if not info_place.get("success"):
+                _dump_recent_events(f"  回合{k+1} place 失败阶段：", n=8)
+            if done_place:
+                closed_loop_ok += 1
+
+        if closed_loop_ok > 0:
+            ok(f"闭环冒烟通过：{closed_loop_ok}/{closed_loop_trials} 回合完成任务")
+        else:
+            warn("闭环冒烟未通过：0 回合完成任务。若常见 TIMED_OUT/CONTROL_FAILED，"
+                 "优先检查控制器参数与 MoveIt 执行链路。")
+
+        # 恢复原方法，避免影响其它测试
+        env._move_to_xy = _orig_move
+        env._open_gripper = _orig_open
+        env._close_gripper = _orig_close
+        env._execute_pick = _orig_pick
+        env._execute_place = _orig_place
         env.close()
-        return True
+        # 允许把问题暴露为 warning，但如果核心结构性约束失败则判失败
+        return spacing_violations == 0 and unreachable_count == 0
     except Exception as e:
         fail(f"失败: {e}"); traceback.print_exc(); return False
 
