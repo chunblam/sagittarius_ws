@@ -93,6 +93,14 @@ EXPLORELLM_MOVEIT_NS=root
 
 **说明**：`/gazebo/...`、`/usb_cam/...` 等一般为全局话题，无需加 `sgr532` 前缀。
 
+**碰撞后仍要可靠 reset（训练多轮）**：`env.reset()` 会先尝试多种 MoveIt 方式回 **`home`**，失败时若 Gazebo 可用且未关闭，会调用 **`/gazebo/reset_simulation`** 重置物理，随后仍由 **`_randomize_scene`** 重新传送方块/桶。默认开启：
+
+```bash
+EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL=1   # 设为 0 可关闭
+```
+
+`reset` 返回的 `info` 中含 **`reset_home_ok`**（布尔），便于统计「本局是否成功回到 home」。
+
 **SRDF named states**：`pick_place_env` 使用与 RViz 一致的 **`home`**（机械臂）、夹爪 **`open`**（张开）、**`middle`**（抓取夹持，约 5cm 块；勿用完全 **`close`**，否则指尖贴死易弹飞物体）。名称在 `envs/pick_place_env.py` 顶部常量 `MOVEIT_ARM_HOME_STATE`、`MOVEIT_GRIPPER_*`；若你包内不同，请改常量以匹配 SRDF。
 
 ### 4. 验证环境

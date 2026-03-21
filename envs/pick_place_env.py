@@ -120,7 +120,7 @@ SPAWN_PARK_Y0 = 0.0
 # GRASP_H 修正：
 #   方块顶面在 z = TABLE_Z + BLOCK_H（5cm 立方体时 0.05m）
 #   末端目标约在方块中部附近：TABLE_Z + GRASP_H ≈ TABLE_Z + BLOCK_H/2 + 小裕量
-#   当前 GRASP_H=0.065 → TABLE_Z+0.065（再抬高 2cm，可按 TCP 再微调）
+#   当前 GRASP_H=0.085 → TABLE_Z+0.085（在旧版 0.065 上再 +2cm，减轻侧向伸入时蹭方块）
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
@@ -135,10 +135,10 @@ BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
 APPROACH_H    = 0.22   # 接近/抬起安全高度（末端 z = TABLE_Z + APPROACH_H）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
-# 过低的单一目标易刮桌面。在 0.03 基础上再 +1.5cm 以减轻偏低问题。
-GRASP_H       = 0.065  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，较 0.045 再 +2cm）
+# 过低的单一目标易刮桌面/蹭方块；当前 GRASP_H 已较早期值抬高（含 +2cm 裕量）。
+GRASP_H       = 0.085  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，原 0.065 上 +2cm）
 # 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
-PRE_GRASP_CLEAR_Z = 0.02  # 在方块顶面上方预留的间隙（米），再落爪
+PRE_GRASP_CLEAR_Z = 0.04  # 在方块顶面上方预留的间隙（米），再落爪（原 0.02 上 +2cm → pre_z≈0.09）
 
 PLACE_H       = 0.11   # 放置高度（末端 z = 0.11m，接近桶口内部）
 
@@ -268,6 +268,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._step_count   = 0
         self._gripper_open = True
         self._holding_color: str = None
+        # reset() 中 _return_home 是否成功（供 info 与日志；碰撞后 home 失败时可能为 False）
+        self._last_home_ok: bool = True
 
         # ── 观测空间 ──────────────────────────────────────────────────────
         # img: SLOT_COUNT * 3 * 28 * 28
@@ -1219,13 +1221,137 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._move_to_xy(x, y, TABLE_Z + APPROACH_H, yaw, orientation_mode="horizontal")
         return True
 
-    def _return_home(self):
+    def _detach_all_attached_blocks_from_scene(self):
+        """reset/碰撞恢复前移除 PlanningScene 中可能挂在本体上的方块附着，避免规划器状态异常。"""
+        if self._planning_scene is None or self._moveit_arm is None:
+            return
         try:
-            self._moveit_arm.set_named_target(MOVEIT_ARM_HOME_STATE)
-            self._moveit_arm.go(wait=True)
-            self._open_gripper()
+            ee = self._moveit_arm.get_end_effector_link()
+        except Exception:
+            return
+        for c in WORLD_SPAWN_COLORS:
+            try:
+                self._planning_scene.remove_attached_object(ee, block_name(c))
+            except Exception:
+                pass
+
+    def _gazebo_reset_simulation(self) -> bool:
+        """调用 Gazebo reset_simulation：重置物理与时间，机械臂回到 spawn 姿态（随后 _randomize_scene 仍会摆物）。"""
+        try:
+            rospy.wait_for_service("/gazebo/reset_simulation", timeout=3.0)
+            rospy.ServiceProxy("/gazebo/reset_simulation", Empty)()
+            rospy.loginfo("[Env] 已调用 /gazebo/reset_simulation")
+            time.sleep(0.4)
+            return True
+        except Exception as e:
+            rospy.logwarn(f"[Env] /gazebo/reset_simulation 不可用或失败: {e}")
+            return False
+
+    def _try_moveit_arm_home(self) -> bool:
+        """多种方式尝试回到 SRDF named state `home`（碰撞后单次 go() 常失败）。"""
+        arm = self._moveit_arm
+        if arm is None:
+            return False
+        try:
+            arm.set_start_state_to_current_state()
         except Exception:
             pass
+        try:
+            arm.clear_pose_targets()
+            arm.set_named_target(MOVEIT_ARM_HOME_STATE)
+            if arm.go(wait=True):
+                return True
+        except Exception as e:
+            rospy.logwarn(f"[Env] MoveIt set_named_target+go(home) 失败: {e}")
+        try:
+            arm.clear_pose_targets()
+            jv = arm.get_named_target_values(MOVEIT_ARM_HOME_STATE)
+            arm.set_joint_value_target(jv)
+            if arm.go(wait=True):
+                return True
+        except Exception as e:
+            rospy.logwarn(f"[Env] MoveIt get_named_target_values+go(home) 失败: {e}")
+        try:
+            arm.clear_pose_targets()
+            orig_pt = arm.get_goal_position_tolerance()
+            orig_ot = arm.get_goal_orientation_tolerance()
+            arm.set_goal_position_tolerance(0.08)
+            arm.set_goal_orientation_tolerance(0.8)
+            arm.set_named_target(MOVEIT_ARM_HOME_STATE)
+            plan_ok, traj, _, err = arm.plan()
+            if plan_ok and traj is not None:
+                ex = arm.execute(traj, wait=True)
+                ok_exec = ex if isinstance(ex, bool) else True
+                arm.set_goal_position_tolerance(orig_pt)
+                arm.set_goal_orientation_tolerance(orig_ot)
+                arm.clear_pose_targets()
+                if ok_exec:
+                    return True
+            arm.set_goal_position_tolerance(orig_pt)
+            arm.set_goal_orientation_tolerance(orig_ot)
+        except Exception as e:
+            rospy.logwarn(f"[Env] MoveIt plan+execute(home) 失败: {e}")
+        try:
+            arm.clear_pose_targets()
+        except Exception:
+            pass
+        return False
+
+    def _return_home(self):
+        """
+        episode reset / close 时回 home：先清附着、停轨迹、再 MoveIt；
+        仍失败且允许时调用 Gazebo reset_simulation，避免长时间训练因一次碰撞无法继续。
+        """
+        self._last_home_ok = True
+        if not self._ros_initialized:
+            self._init_ros()
+        if self._moveit_arm is None:
+            self._last_home_ok = False
+            return
+
+        self._detach_all_attached_blocks_from_scene()
+        try:
+            self._moveit_arm.stop()
+            self._moveit_arm.clear_pose_targets()
+        except Exception:
+            pass
+        try:
+            if self._moveit_gripper is not None:
+                self._moveit_gripper.stop()
+                self._moveit_gripper.clear_pose_targets()
+        except Exception:
+            pass
+        try:
+            if self._moveit_gripper is not None:
+                self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_OPEN_STATE)
+                self._moveit_gripper.go(wait=True)
+                self._gripper_open = True
+        except Exception as e:
+            rospy.logwarn(f"[Env] reset 开爪失败（可忽略）: {e}")
+
+        ok = self._try_moveit_arm_home()
+        if not ok and env_config.gazebo_reset_simulation_on_home_fail():
+            rospy.logwarn(
+                "[Env] MoveIt 回 home 失败，尝试 Gazebo reset_simulation 后重试（"
+                "物体位置将在 _randomize_scene 中重新传送）")
+            if self._gazebo_reset_simulation():
+                try:
+                    rospy.ServiceProxy("/gazebo/unpause_physics", Empty)()
+                except Exception:
+                    pass
+                time.sleep(0.35)
+                ok = self._try_moveit_arm_home()
+
+        if not ok:
+            rospy.logwarn(
+                "[Env] 回 home 仍失败；本 episode 可能仍异常。可检查碰撞或重启 Gazebo；"
+                "或设置 EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL=1（默认已开启）")
+            self._last_home_ok = False
+        else:
+            try:
+                self._open_gripper()
+            except Exception as e:
+                rospy.logwarn(f"[Env] home 后开爪失败: {e}")
 
     # ── 奖励函数 ──────────────────────────────────────────────────────────────
 
@@ -1346,6 +1472,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             "n_blocks":            self.n_blocks_ep,
             "n_bins":              self.n_bins_ep,
             "n_colors":            self.n_active,
+            "reset_home_ok":       bool(self._last_home_ok),
         }
         return obs, info
 

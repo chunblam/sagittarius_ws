@@ -11,6 +11,8 @@
   LLM_* / VLM_*（各 3 个）— 见下方常量名
   EXPLORELLM_MOVEIT_NS — 机器人/MoveIt 所在 ROS 命名空间（默认 sgr532）
   EXPLORELLM_MOVEIT_WAIT — 连接 move_group action 超时秒数（默认 30）
+  EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL — MoveIt 回 home 失败后是否调用
+      /gazebo/reset_simulation 恢复物理（默认 1，训练推荐；无 Gazebo 时自动跳过）
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ DEFAULT_VLM_MODEL = "qwen-vl"
 # Sagittarius Gazebo 常见 launch：参数在 /sgr532/robot_description，move_group 在 /sgr532/move_group
 MOVEIT_NS_ENV = "EXPLORELLM_MOVEIT_NS"
 MOVEIT_WAIT_ENV = "EXPLORELLM_MOVEIT_WAIT"
+GAZEBO_RESET_SIM_ON_HOME_FAIL_ENV = "EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL"
 DEFAULT_MOVEIT_NS = "sgr532"
 DEFAULT_MOVEIT_WAIT_S = 30.0
 
@@ -97,6 +100,16 @@ def moveit_robot_description_param() -> str:
     if not ns:
         return "/robot_description"
     return f"/{ns}/robot_description"
+
+
+def gazebo_reset_simulation_on_home_fail() -> bool:
+    """
+    MoveIt 回 named home 失败时，是否调用 Gazebo /gazebo/reset_simulation。
+    默认 True：碰撞后关节/物理卡住时仍可恢复训练；随后 reset() 仍会 _randomize_scene 摆放物体。
+    设为 0/false 可关闭（例如调试 MoveIt）。无 Gazebo 时服务不可用，环境会忽略。
+    """
+    raw = os.environ.get(GAZEBO_RESET_SIM_ON_HOME_FAIL_ENV, "1")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def moveit_move_group_commander_kwargs() -> dict:
