@@ -100,11 +100,11 @@ PLACE_RECT_Y = (-0.18, 0.18)
 # 仅用于 step() 里对动作的矩形裁剪（略宽于 PLACE_RECT）
 OBJECT_ZONE_X = (0.15, 0.44)
 OBJECT_ZONE_Y = (-0.20, 0.20)
-# 物体中心之间最小距离（米）；与实物「至少 10cm」一致，减少拥挤导致的规划失败
-MIN_OBJECT_CENTER_GAP = 0.10
+# 物体中心之间最小距离（米）；放宽至 4cm 以增加可行摆放与布局多样性
+MIN_OBJECT_CENTER_GAP = 0.04
 # 网格落位时在 x/y 上的一次性随机偏移（米），仅在 reset 传送时加一次，**不是**物理引擎每帧抖动。
-# 默认 ±5mm：略打破完全规则的网格对齐；设为 0 则与「摆好后位置固定」一致。
-OBJECT_PLACE_JITTER = 0.005
+# 默认 ±8mm：略打破完全规则的网格对齐；设为 0 则与「摆好后位置固定」一致。
+OBJECT_PLACE_JITTER = 0.008
 
 # 首次 spawn 临时落点（远离桌面，避免与桌台重叠）
 SPAWN_PARK_X = 2.0
@@ -124,7 +124,7 @@ SPAWN_PARK_Y0 = 0.0
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
-#   TABLE_Z + APPROACH_H = 0.22m（高于桶顶约 10cm，便于抬起后验证与 TCP/方块 COM 偏差）
+#   TABLE_Z + APPROACH_H = 0.24m（高于桶顶约 12cm，便于抬起后验证与 TCP/方块 COM 偏差）
 # ──────────────────────────────────────────────────────────
 TABLE_Z       = 0.00   # 桌面顶面（world文件里桌面顶面在 z=0）
 BLOCK_H       = 0.05   # 方块高度（与 world 中 5cm 立方体一致）
@@ -133,7 +133,7 @@ BIN_H         = 0.12   # 垃圾桶高度（外高）
 BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
-APPROACH_H    = 0.22   # 接近/抬起安全高度（末端 z = TABLE_Z + APPROACH_H）
+APPROACH_H    = 0.24   # 接近/抬起安全高度（末端 z = TABLE_Z + APPROACH_H）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面/蹭方块；当前 GRASP_H 已较早期值抬高（含 +2cm 裕量）。
 GRASP_H       = 0.085  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，原 0.065 上 +2cm）
@@ -186,6 +186,11 @@ MOVEIT_ARM_HOME_STATE = "home"
 MOVEIT_GRIPPER_OPEN_STATE = "open"
 # 抓取时用 middle：完全 close 时两指贴死，无法容纳 5cm 方块且易弹飞；与实验示例一致
 MOVEIT_GRIPPER_GRASP_STATE = "middle"
+# MoveIt OMPL：单次 plan 允许的最长时间（秒）与单次规划请求内的并行/重试次数。
+# 单次时间过长（如 30s）在 z=APPROACH_H 等难姿态下易长时间卡在 TIMED_OUT；缩短单次上限并增加尝试次数，
+# 失败更快换随机种子重试（不保证「立刻」有解，但典型上缩短用户感知的单次卡顿）。
+MOVEIT_PLANNING_TIME_S = 4.0
+MOVEIT_NUM_PLANNING_ATTEMPTS = 32
 
 # Gazebo模型名称约定：{color}_block, {color}_bin
 def block_name(color: str) -> str: return f"{color}_block"
@@ -354,8 +359,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         self._moveit_arm.set_max_velocity_scaling_factor(0.5)
         self._moveit_arm.set_max_acceleration_scaling_factor(0.5)
         self._moveit_arm.allow_replanning(True)
-        self._moveit_arm.set_planning_time(30.0)
-        self._moveit_arm.set_num_planning_attempts(16)
+        self._moveit_arm.set_planning_time(float(MOVEIT_PLANNING_TIME_S))
+        self._moveit_arm.set_num_planning_attempts(int(MOVEIT_NUM_PLANNING_ATTEMPTS))
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。

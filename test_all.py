@@ -4,7 +4,7 @@
 test_all.py  (v3 — VLM 感知升级版)
 =====================================
 变化：
-  - Test 5：A reset 体检 → B 奖励方向 → D 理想分阶段(开爪~抬离) → C 闭环冒烟；可加 --test5-auto
+  - Test 5：A reset 体检 → B 奖励方向（正确/错误 pick 间释放持块）→ D 理想分阶段 → C 闭环；可加 --test5-auto
   - Test 6 升级为 VLM 感知测试（替代 HSV 分区检测）
   - Test 7 保持 LLM API 连接测试
 """
@@ -169,15 +169,40 @@ def _test5_pause(interactive: bool, msg: str) -> None:
     input(f"  {BOLD}按 Enter 继续…{RESET} ")
 
 
+def _test5_release_arm_after_pick(env):
+    """
+    正确 pick 后 env 处于持块（middle）且 PlanningScene attach，直接再 env.step 抓另一色时
+    MoveIt 常以 START_STATE_IN_COLLISION 中止。去附着、开爪并回 home，恢复无持块状态。
+    """
+    held = getattr(env, "_holding_color", None)
+    if held:
+        try:
+            env._detach_held_block_from_scene(held)
+        except Exception:
+            pass
+    env._holding_color = None
+    try:
+        env._open_gripper()
+    except Exception:
+        pass
+    time.sleep(0.35)
+    try:
+        env._return_home()
+    except Exception:
+        pass
+    time.sleep(0.5)
+
+
 def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
     """
     与 pick_place_env._execute_pick / _execute_place 等价的理想分阶段流程：
     开爪 → 方块上方 → 预降 → 抓取高度 → 夹持 → 抬起验证 → 桶上方 → 下放 → 开爪释放 → 抬离
     使用 Gazebo GT；每步前可暂停观察。
+
+    调用方应在进入 D 段前已执行 env.reset()（Test5 在 B 段结束后会 reset）。
     """
     import math
 
-    env.reset()
     env._refresh_positions()
     pick_c = env.pick_color
     place_c = env.place_color
@@ -297,6 +322,10 @@ def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
 def test_5_env_reset_step(interactive: bool = True):
     """
     环境综合体检：A reset → B 奖励 step → D 理想分阶段操控 → C 闭环 step。
+
+    各段边界处显式 env.reset()；B 段在「正确 pick」与「错误 pick」之间调用
+    _test5_release_arm_after_pick（detach+开爪+home），避免持块再抓他色触发碰撞。
+
     interactive：Enter 逐步；--test5-auto 连续运行。
     """
     section("Test 5: 环境综合体检（A reset / B 奖励 / D 分阶段 / C 闭环）")
@@ -395,7 +424,8 @@ def test_5_env_reset_step(interactive: bool = True):
         env._execute_pick = _pick_diag
         env._execute_place = _place_diag
 
-        info("MoveIt：planning_time≈30s；位置容差≈12mm、姿态≈0.12rad（见 pick_place_env._init_ros）")
+        info("MoveIt：planning_time 与尝试次数见 pick_place_env.MOVEIT_PLANNING_TIME_S / "
+             "MOVEIT_NUM_PLANNING_ATTEMPTS；位置容差≈12mm、姿态≈0.12rad")
         info("观测噪声 σ≈3cm 仅进入 obs，不进入 step 执行；执行目标=Gazebo GT。")
         _test5_pause(interactive, "即将开始 A：多次 reset 场景体检（不移动机械臂）")
 
@@ -403,6 +433,7 @@ def test_5_env_reset_step(interactive: bool = True):
         n_reset = 3
         spacing_violations = 0
         unreachable_count = 0
+        gap_min = float(ppe_mod.MIN_OBJECT_CENTER_GAP)
         info(f"执行 {n_reset} 次 reset 场景体检...")
         for ridx in range(n_reset):
             t0 = time.time()
@@ -426,7 +457,7 @@ def test_5_env_reset_step(interactive: bool = True):
             if np.all(bin_pos == 0):
                 warn("  桶位置全是 0，检查 Gazebo 桶模型是否加载")
 
-            # 物体两两间距（≥10cm，与 MIN_OBJECT_CENTER_GAP 一致）
+            # 物体两两间距（与 pick_place_env.MIN_OBJECT_CENTER_GAP 一致）
             pts = []
             for c in env._active_block_colors:
                 pts.append(env._get_pose(f"{c}_block")[:2])
@@ -435,10 +466,10 @@ def test_5_env_reset_step(interactive: bool = True):
             for i in range(len(pts)):
                 for j in range(i + 1, len(pts)):
                     d = float(np.linalg.norm(pts[i] - pts[j]))
-                    if d < 0.10:
+                    if d < gap_min:
                         spacing_violations += 1
                         warn(f"  reset#{ridx+1} 物体 {i} 与 {j} 距离过近: "
-                             f"{d:.3f} m（应 ≥ 0.10 m）")
+                             f"{d:.3f} m（应 ≥ {gap_min:.2f} m）")
 
             # 可达性检查（若环境提供可达性函数）
             # 注意：这里用 Gazebo GT 位姿，不用 obs 带噪声位姿，避免误报。
@@ -462,7 +493,7 @@ def test_5_env_reset_step(interactive: bool = True):
             )
 
         if spacing_violations == 0:
-            ok(f"{n_reset} 次 reset：物体间距检查通过（阈值 0.10m）")
+            ok(f"{n_reset} 次 reset：物体间距检查通过（阈值 {gap_min:.2f}m）")
         else:
             warn(f"{n_reset} 次 reset：发现 {spacing_violations} 次物体间距过近")
         if unreachable_count == 0:
@@ -470,11 +501,13 @@ def test_5_env_reset_step(interactive: bool = True):
         else:
             warn(f"{n_reset} 次 reset：发现 {unreachable_count} 个观测点疑似不可达")
 
-        # 使用最后一次 reset 的状态做 step 检查
+        # A 段结束：再 reset 一次，使 B 段从独立 episode 开始（与训练每局 reset 一致）
+        _test5_pause(interactive, "A 段结束：将 env.reset 后进入 B 段（奖励方向检查）")
+        obs, info_dict = env.reset()
         active = list(info_dict.get("active_colors", env._active_colors))
         pick_color = info_dict.get("pick_color")
         place_color = info_dict.get("place_color")
-        info(f"用于 step 检查: pick={pick_color}, place={place_color}, active={active}")
+        info(f"  B 段起始任务: pick={pick_color}, place={place_color}, active={active}")
 
         def _print_gt_block(color: str):
             p = env._get_pose(f"{color}_block")
@@ -484,7 +517,7 @@ def test_5_env_reset_step(interactive: bool = True):
         for c in env._active_block_colors:
             _print_gt_block(c)
 
-        # ── B. 奖励方向检查：正确 pick vs 错误 pick ───────────────────────
+        # ── B. 奖励方向检查：正确 pick → 释放持块状态 → 错误 pick ─────────────
         info("\n奖励方向检查：正确 pick vs 错误 pick")
         pick_idx = env._active_block_colors.index(pick_color)
         action_correct = np.array(
@@ -500,6 +533,11 @@ def test_5_env_reset_step(interactive: bool = True):
             _dump_recent_events("  正确 pick 失败，最近阶段记录：")
 
         _test5_pause(interactive, "B 段：正确 pick 已结束。若失败请对照上方 move 阶段与 GT。")
+
+        # 成功 pick 后处于持块+attach，直接再抓另一色会 START_STATE_IN_COLLISION：先释放再测错误 pick
+        if info2.get("success") or getattr(env, "_holding_color", None):
+            info("  释放持块状态（PlanningScene detach + 开爪 + 回 home），再执行错误 pick…")
+            _test5_release_arm_after_pick(env)
 
         nb_ep = env.n_blocks_ep
         wrong_idx = (pick_idx + 1) % nb_ep   # 选一个不同的方块槽位
@@ -521,6 +559,10 @@ def test_5_env_reset_step(interactive: bool = True):
             warn(f"  奖励可能异常：错误颜色 {r_wrong:.4f} > 正确颜色 {r_correct:.4f}")
             warn("  若执行已改用 GT，此项多来自观测噪声或奖励设计，可多跑几次对照。")
 
+        # B 段结束：reset 后进入 D（_test5_run_ideal_phases 不再内部 reset，避免与 B 状态纠缠）
+        _test5_pause(interactive, "B 段结束：将 env.reset 后进入 D 段（理想分阶段操控）")
+        env.reset()
+
         # ── D. 理想分阶段：移动 → 预降 → 落爪 → 夹持 → 抬起 → 桶上方 → 下放 → 释放
         info("\n恢复 env 原始原语（去掉诊断包装），用于 D 段逐步执行…")
         env._move_to_xy = _orig_move
@@ -531,7 +573,7 @@ def test_5_env_reset_step(interactive: bool = True):
 
         _test5_pause(
             interactive,
-            "B 段结束。即将进入 D：按「开爪→方块上方→预降→抓取高→夹持→抬起→"
+            "即将进入 D：按「开爪→方块上方→预降→抓取高→夹持→抬起→"
             "桶上方→下放→开爪→抬离」分步执行（与 _execute_pick/_execute_place 一致）。",
         )
         if not _test5_run_ideal_phases(env, ppe_mod, interactive):
@@ -544,7 +586,10 @@ def test_5_env_reset_step(interactive: bool = True):
         env._execute_pick = _pick_diag
         env._execute_place = _place_diag
 
-        _test5_pause(interactive, "D 段结束。即将进入 C：闭环冒烟（env.step 整段 pick/place）。")
+        _test5_pause(interactive, "D 段结束：将 env.reset 后进入 C 段（闭环冒烟）")
+        env.reset()
+
+        _test5_pause(interactive, "即将进入 C：每回合仍会 env.reset，整段 pick/place 直到 done/trunc。")
 
         # ── C. 闭环冒烟：单回合执行到 done/trunc，再进入下一回合 ─────────────
         info("\n闭环冒烟测试（每回合执行到 done/trunc，最多 3 回合）")
