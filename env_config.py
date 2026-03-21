@@ -103,12 +103,12 @@ def moveit_planning_time_s() -> float:
     """
     raw = os.environ.get(MOVEIT_PLANNING_TIME_ENV, "").strip()
     if not raw:
-        return 8.0
+        return 30
     try:
         t = float(raw)
         return max(0.5, min(t, 120.0))
     except ValueError:
-        return 8.0
+        return 30
 
 
 def moveit_robot_description_param() -> str:
