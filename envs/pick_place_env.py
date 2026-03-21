@@ -1060,8 +1060,15 @@ class SagittariusPickPlaceEnv(gym.Env):
           - "yaw"：纯绕世界 Z 的 yaw（末端仍朝上，用于放置时的垂直下放）。
 
         避障：通过 MoveIt PlanningScene 中的桌面 + 方块 + 桶碰撞体自动避障。
+
+        注意：持块时 `ignore_block_color` 会跳过该色方块的世界盒（避免与附着几何重复）。
+        `_sync_moveit_planning_scene` 每次会重建世界物体，可能清掉 ACM 里「附着块–桶」的豁免；
+        因此在 sync 之后若仍持该色块，需重新 `_try_allow_held_block_vs_bins_planning`，
+        否则易出现 START_STATE_IN_COLLISION 或规划失败（附着盒与桶盒重叠）。
         """
         self._sync_moveit_planning_scene(ignore_block_color=ignore_block_color)
+        if ignore_block_color:
+            self._try_allow_held_block_vs_bins_planning(ignore_block_color)
         self._moveit_arm.set_start_state_to_current_state()
         ee_link = self._moveit_arm.get_end_effector_link()
 
@@ -1290,7 +1297,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         yaw_bin = float(math.atan2(place_y - ARM_BASE_Y, place_x - ARM_BASE_X))
         ign = pick_color
-        self._try_allow_held_block_vs_bins_planning(pick_color)
+        # 持块–桶碰撞豁免改在 _move_to_xy 内 sync 之后统一调用，避免重建场景后 ACM 丢失
 
         if not self._move_to_xy(
             place_x, place_y, TABLE_Z + APPROACH_H, yaw_bin,

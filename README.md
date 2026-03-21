@@ -30,7 +30,7 @@ sagittarius_ws/
 │   └── camera_perception.py  ← 真机感知（面积区分方块/桶）
 ├── train.py                  ← 训练脚本（单次 + 消融实验）
 ├── eval.py                      ← 评估 + 训练曲线绘图
-├── test_all.py                  ← 分步环境验证测试
+├── test_all.py                  ← 环境验证（Test5 为 3 回合 pick_and_place 闭环）
 ├── calibration_guide.py         ← 标定值读取工具
 ├── pick_place_scene.world    ← Gazebo 场景（6 色 12 物体模型；训练按课程 2+2 / 3+2 激活子集）
 ├── docs/
