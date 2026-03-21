@@ -6,7 +6,7 @@ pick_place_env.py
 升级版环境，相比原版的核心变化：
 
   变化1：支持任意多种颜色（从 color_config 动态读取）
-  变化2：垃圾桶/方块在基座极坐标扇区（ARM_PLACE_*）内随机，避免落入 r<MIN 再被投影外推
+  变化2：垃圾桶/方块在「底座前方」轴对齐矩形（PLACE_RECT_*）内随机，并禁止落入底座碰撞圆
   变化3：observation 向量用任务颜色 index（固定槽位数）
   变化4：observation 包含桶的位置（桶每回合随机）
 
@@ -82,23 +82,28 @@ ARM_BASE_Y = 0.0
 ARM_REACH_MIN_R = 0.18
 ARM_REACH_MAX_R = 0.33
 
-# ── 物体随机摆放：用「极坐标」在可达环上采样，**不要**再用含「基座近圆孔 r<ARM_REACH_MIN_R」
-# 的轴对齐矩形做主采样区：否则 _project_to_reachable_xy 会把点沿径向推到 r=ARM_REACH_MIN_R，
-# 表现为「一随机就往外跑、远离机械臂」。
+# ── 物体随机摆放（重要坐标说明）────────────────────────────────────────────
+# ARM_BASE_* 仅用于「可达环」IK 判定（工作区参考点，常与桌面几何中心一致），**不是**机械臂物理底座
+# 在 world 里的位置。若用 ARM_BASE 做极坐标且 theta≈π，会把物体摆到 x≈0.06~0.12（台面左侧），
+# 与真实底座重合 → 方块穿进底座。
 #
-# 世界系：ARM_BASE_* 为参考点；极坐标 theta 从 +X 轴逆时针为正。
-# 实验室常见布局：机械臂在台面**左侧**，物体应落在「面前」中部，而不是沿 +X 伸到桌面**远端**。
-# 因此默认扇区取在 **theta≈π**（从基座指向 **−X**，台面靠机械臂一侧），r 取内环偏小，远离外伸极限。
-# 若你仿真里物体跑到另一侧，将 ARM_PLACE_THETA_OFFSET 改为 0 或 π 对调即可。
-ARM_PLACE_R_MIN = ARM_REACH_MIN_R + 0.002
-ARM_PLACE_R_MAX = 0.22                      # 内环，物体更靠近基座「甜区」
-ARM_PLACE_THETA_MIN = math.pi - 0.50         # rad，约 π±28°
-ARM_PLACE_THETA_MAX = math.pi + 0.50
-ARM_PLACE_THETA_OFFSET = 0.0
+# 正确做法：
+#   1) 用 ROBOT_BASE_EXCLUSION_* 描述**物理底座**在桌面上的投影，物体中心禁止进入该圆；
+#   2) 用 PLACE_RECT_* 描述**底座前方**作业矩形（沿 +X 为「向桌内」时，取 x 明显大于底座一侧）；
+#   3) 采样点必须同时满足：在 PLACE_RECT 内、在可达环内、在底座碰撞圆外。
+#
+# 若仿真里底座位置不同，请只改 ROBOT_BASE_EXCLUSION_XY / RADIUS 与 PLACE_RECT_*（可略缩窄矩形）。
+ROBOT_BASE_EXCLUSION_XY = (0.10, 0.0)   # 机械臂底座中心在 world 水平面的大致位置（米）
+ROBOT_BASE_EXCLUSION_RADIUS = 0.28      # 底座+连杆占地+安全边：圆内不放物体中心
 
-# 仅用于 step() 里对动作的矩形裁剪（覆盖上述扇区外包络）
-OBJECT_ZONE_X = (0.05, 0.48)
-OBJECT_ZONE_Y = (-0.22, 0.22)
+# 底座「前方」作业矩形（与实验室黑框一致时可再微调）。需在 [ARM_REACH_MIN_R, ARM_REACH_MAX_R]
+# 环内且整体远离 ROBOT_BASE_EXCLUSION 圆。
+PLACE_RECT_X = (0.38, 0.54)
+PLACE_RECT_Y = (-0.16, 0.16)
+
+# 仅用于 step() 里对动作的矩形裁剪（略宽于 PLACE_RECT）
+OBJECT_ZONE_X = (0.36, 0.56)
+OBJECT_ZONE_Y = (-0.18, 0.18)
 # 物体中心之间最小距离（米）；与实物「至少 10cm」一致，减少拥挤导致的规划失败
 MIN_OBJECT_CENTER_GAP = 0.10
 # 网格落位时在 x/y 上的一次性随机偏移（米），仅在 reset 传送时加一次，**不是**物理引擎每帧抖动。
@@ -570,10 +575,15 @@ class SagittariusPickPlaceEnv(gym.Env):
         rospy.sleep(0.1)
 
     def _deterministic_grid(self, n: int, zone_x: tuple,
-                            zone_y: tuple, gap: float) -> list:
+                            zone_y: tuple, gap: float,
+                            placement_valid: bool = False) -> list:
         cols = max(1, int((zone_x[1] - zone_x[0]) / gap))
         rows = max(1, int((zone_y[1] - zone_y[0]) / gap))
         pts  = []
+        def _cell_ok(cx: float, cy: float) -> bool:
+            if placement_valid:
+                return self._is_valid_placement_xy(cx, cy)
+            return self._is_reachable_xy(cx, cy)
         for row in range(rows):
             for col in range(cols):
                 cx = zone_x[0] + gap * (col + 0.5)
@@ -581,7 +591,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                 if (
                     cx <= zone_x[1]
                     and cy <= zone_y[1]
-                    and self._is_reachable_xy(cx, cy)
+                    and _cell_ok(cx, cy)
                 ):
                     pts.append((cx, cy))
                 if len(pts) >= n:
@@ -602,51 +612,63 @@ class SagittariusPickPlaceEnv(gym.Env):
         s = rr / r
         return np.array([ARM_BASE_X + dx * s, ARM_BASE_Y + dy * s], dtype=np.float32)
 
-    def _theta_place(self, t: float) -> float:
-        return float(t) + float(ARM_PLACE_THETA_OFFSET)
+    def _is_clear_of_robot_base(self, x: float, y: float) -> bool:
+        """物体中心不得进入机械臂底座碰撞圆（与 ARM_BASE 可达环是两套约束）。"""
+        bx, by = ROBOT_BASE_EXCLUSION_XY
+        r = float(np.hypot(x - bx, y - by))
+        return r >= float(ROBOT_BASE_EXCLUSION_RADIUS) - 1e-9
 
-    def _build_polar_placement_candidates(self) -> List[Tuple[float, float]]:
-        """在基座极坐标下生成可达栅格点（内环 + 前侧扇区），避免轴对齐矩形落入 r<MIN 再被投影外推。"""
+    def _is_valid_placement_xy(self, x: float, y: float) -> bool:
+        """可达环内 + 不在底座碰撞圆内 + 在作业矩形内（双保险）。"""
+        if not self._is_reachable_xy(x, y):
+            return False
+        if not self._is_clear_of_robot_base(x, y):
+            return False
+        if not (PLACE_RECT_X[0] <= x <= PLACE_RECT_X[1]
+                and PLACE_RECT_Y[0] <= y <= PLACE_RECT_Y[1]):
+            return False
+        return True
+
+    def _build_rect_placement_candidates(self) -> List[Tuple[float, float]]:
+        """在 PLACE_RECT 内细网格上生成候选点，仅保留 _is_valid_placement_xy。"""
         pts: List[Tuple[float, float]] = []
-        rr = np.linspace(ARM_PLACE_R_MIN, ARM_PLACE_R_MAX, 18)
-        tt = np.linspace(
-            self._theta_place(ARM_PLACE_THETA_MIN),
-            self._theta_place(ARM_PLACE_THETA_MAX), 24)
-        for r in rr:
-            for t in tt:
-                x = ARM_BASE_X + float(r * np.cos(t))
-                y = ARM_BASE_Y + float(r * np.sin(t))
-                if self._is_reachable_xy(x, y):
-                    pts.append((x, y))
+        cell = max(0.035, min(MIN_OBJECT_CENTER_GAP * 0.42,
+                               (PLACE_RECT_X[1] - PLACE_RECT_X[0]) / 8.0,
+                               (PLACE_RECT_Y[1] - PLACE_RECT_Y[0]) / 6.0))
+        rx, ry = PLACE_RECT_X, PLACE_RECT_Y
+        cols = max(1, int((rx[1] - rx[0]) / cell))
+        rows = max(1, int((ry[1] - ry[0]) / cell))
+        for row in range(rows):
+            for col in range(cols):
+                cx = rx[0] + cell * (col + 0.5)
+                cy = ry[0] + cell * (row + 0.5)
+                if cx <= rx[1] and cy <= ry[1]:
+                    if self._is_valid_placement_xy(float(cx), float(cy)):
+                        pts.append((float(cx), float(cy)))
         return pts
 
-    def _sample_polar_xy(self, rng: np.random.Generator) -> Tuple[float, float]:
-        """均匀随机极坐标，用于网格失败时的回退摆放。"""
-        for _ in range(50):
-            r = float(rng.uniform(ARM_PLACE_R_MIN, ARM_PLACE_R_MAX))
-            theta = float(rng.uniform(
-                self._theta_place(ARM_PLACE_THETA_MIN),
-                self._theta_place(ARM_PLACE_THETA_MAX)))
-            x = ARM_BASE_X + r * math.cos(theta)
-            y = ARM_BASE_Y + r * math.sin(theta)
-            if self._is_reachable_xy(x, y):
+    def _sample_rect_xy(self, rng: np.random.Generator) -> Tuple[float, float]:
+        """在 PLACE_RECT 内均匀随机，直到满足有效放置约束。"""
+        for _ in range(120):
+            x = float(rng.uniform(*PLACE_RECT_X))
+            y = float(rng.uniform(*PLACE_RECT_Y))
+            if self._is_valid_placement_xy(x, y):
                 return x, y
-        r = float(0.5 * (ARM_PLACE_R_MIN + ARM_PLACE_R_MAX))
-        theta = float(rng.uniform(
-            self._theta_place(ARM_PLACE_THETA_MIN),
-            self._theta_place(ARM_PLACE_THETA_MAX)))
-        return (
-            ARM_BASE_X + r * math.cos(theta),
-            ARM_BASE_Y + r * math.sin(theta),
-        )
+        # 退化：矩形几何中心附近（仍做校验）
+        cx = 0.5 * (PLACE_RECT_X[0] + PLACE_RECT_X[1])
+        cy = 0.5 * (PLACE_RECT_Y[0] + PLACE_RECT_Y[1])
+        if self._is_valid_placement_xy(cx, cy):
+            return cx, cy
+        return cx, cy
 
     def _greedy_grid_centers(self, n_needed: int, gap: float,
                              rng: np.random.Generator) -> List[Tuple[float, float]]:
-        """在极坐标栅格上贪心选取 n 个点，两两中心距 ≥ gap。"""
-        candidates = self._build_polar_placement_candidates()
+        """在 PLACE_RECT 栅格上贪心选取 n 个点，两两中心距 ≥ gap。"""
+        candidates = self._build_rect_placement_candidates()
         if len(candidates) < max(8, n_needed * 3):
             rospy.logwarn(
-                "[Env] 极坐标候选点偏少，请检查 ARM_PLACE_R_* / THETA_*")
+                "[Env] 作业矩形内有效候选点偏少，请放宽 PLACE_RECT_* 或 "
+                "ROBOT_BASE_EXCLUSION_* / 可达环")
         rng.shuffle(candidates)
         selected: List[Tuple[float, float]] = []
         for pt in candidates:
@@ -661,7 +683,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         return selected
 
     def _place_active_objects_unified(self, rng: np.random.Generator) -> None:
-        """在 ARM_PLACE_* 极坐标扇区（内环）摆放；优先极坐标栅格+微抖动，不用投影把点推出内孔。"""
+        """在 PLACE_RECT 作业矩形内摆放；优先矩形栅格+微抖动；永不进入底座碰撞圆。"""
         targets: List[Tuple[str, float]] = []
         for c in self._active_block_colors:
             targets.append((block_name(c), BLOCK_H / 2.0))
@@ -687,10 +709,10 @@ class SagittariusPickPlaceEnv(gym.Env):
                     for _ in range(24):
                         tx = cx + float(rng.uniform(-jitter, jitter))
                         ty = cy + float(rng.uniform(-jitter, jitter))
-                        if self._is_reachable_xy(tx, ty):
+                        if self._is_valid_placement_xy(tx, ty):
                             x, y = tx, ty
                             break
-                if not self._is_reachable_xy(x, y):
+                if not self._is_valid_placement_xy(x, y):
                     x, y = cx, cy
                 self._teleport(nm, x, y, zc)
             return True
@@ -700,13 +722,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             return
 
         rospy.logwarn(
-            "[Env] 极坐标网格摆放失败，回退到极坐标随机采样")
+            "[Env] 矩形网格摆放失败，回退到矩形内随机采样")
 
         placed_xy: List[Tuple[float, float]] = []
         for idx, (nm, zc) in enumerate(targets):
             ok = False
             for _ in range(400):
-                x, y = self._sample_polar_xy(rng)
+                x, y = self._sample_rect_xy(rng)
                 if all(
                     np.hypot(x - px, y - py) >= gap
                     for px, py in placed_xy
@@ -718,7 +740,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             if ok:
                 continue
             grid = self._deterministic_grid(
-                n, OBJECT_ZONE_X, OBJECT_ZONE_Y, gap)
+                n, PLACE_RECT_X, PLACE_RECT_Y, gap, placement_valid=True)
             if idx < len(grid):
                 x, y = grid[idx]
                 placed_xy.append((x, y))
@@ -727,7 +749,7 @@ class SagittariusPickPlaceEnv(gym.Env):
                     f"[Env] {nm} 随机摆放失败，使用 fallback 网格 ({x:.3f},{y:.3f})")
             else:
                 rospy.logerr(
-                    "[Env] 物体无法摆放：请放宽 ARM_PLACE_R_MAX / THETA 或减小 "
+                    "[Env] 物体无法摆放：请放宽 PLACE_RECT_* 或 "
                     "MIN_OBJECT_CENTER_GAP / 物体数量")
 
     def _randomize_scene(self):
@@ -735,7 +757,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         随机化场景：
           1. 按 curriculum_mode 抽取方块/桶颜色子集与任务；
           2. 未激活模型从 Gazebo 删除；缺失模型按 world 模板 spawn；
-          3. 在 ARM_PLACE_* 极坐标扇区内摆放（网格优先 + 微抖动），中心距 ≥ MIN_OBJECT_CENTER_GAP。
+          3. 在 PLACE_RECT_* 矩形内摆放（网格优先 + 微抖动），中心距 ≥ MIN_OBJECT_CENTER_GAP，
+             且永不进入 ROBOT_BASE_EXCLUSION 圆。
         """
         rng = np.random.default_rng()
 

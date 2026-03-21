@@ -68,7 +68,7 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
 
-**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）；方块/桶在 **`ARM_PLACE_*` 极坐标扇区**（内环、默认 **theta≈π**，台面靠机械臂一侧，避免物体跑到远端）随机，**物体中心最小间距 0.10m**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=topdown`**：优先俯视四元数再回退 yaw，减少侧向夹取占用的 xy 空间；可改 **`yaw`** 恢复旧行为。另可调 **`TCP_GRASP_XY_BACKOFF_M`**。若物体总出现在台面错误一侧，改 **`ARM_PLACE_THETA_OFFSET`**（例如 `0` 与 `π` 对调）。**与旧 checkpoint 不兼容时需重新训练**。
+**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.10m**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=topdown`**；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
