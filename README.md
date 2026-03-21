@@ -68,7 +68,7 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
 
-**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.10m**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=topdown`**；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
+**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形，见 `pick_place_env.py` 常量）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.10m**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=horizontal`**（侧向水平对准目标）；基础四元数见 **`TCP_HORIZONTAL_BASE_QUAT`**，若 URDF 中 `ee_link` 定义不同需在 RViz/MoveIt 中微调；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
@@ -188,12 +188,14 @@ python train.py --colors red green blue yellow
 
 ### 桌面摆放规则
 
-| 区域 | 物体 | x 范围 | y 范围 |
-|------|------|--------|--------|
-| 左半区 | 彩色方块 | 0.15 ~ 0.30 m | -0.18 ~ 0.18 m |
-| 右半区 | 彩色垃圾桶 | 0.28 ~ 0.40 m | -0.18 ~ 0.18 m |
+仿真中方块与桶均在同一作业矩形 **`PLACE_RECT_*`**（当前约 **x: 0.18~0.42 m**，**y: ±0.18 m**，以 `pick_place_env.py` 为准）内随机摆放，并满足与底座碰撞圆、物体间距等约束；真机可仍按「左方块、右桶」大致分区，与仿真不必逐厘米一致。
 
-方块和垃圾桶**不需要精确测量位置**，摄像头会实时检测。两个区域略有重叠，不需要严格对齐，只需大致左放方块、右放垃圾桶即可。
+| 说明 | 物体 | 典型 x（真机参考） | y 范围 |
+|------|------|-------------------|--------|
+| 左偏 | 彩色方块 | 较小 x | -0.18 ~ 0.18 m |
+| 右偏 | 彩色垃圾桶 | 较大 x | -0.18 ~ 0.18 m |
+
+方块和垃圾桶**不需要精确测量位置**，摄像头会实时检测。
 
 **同颜色的方块和桶不会混淆**：系统用面积区分——方块顶面小、桶开口大，面积差异在2~3倍，自动分类，不依赖人工干预。
 

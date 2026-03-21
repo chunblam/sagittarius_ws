@@ -232,14 +232,21 @@ def test_5_env_reset_step():
             _append_event("gripper:close", True, time.time() - t0)
 
         def _pick_diag(x, y, color, pose_id):
-            _append_event("pick:start", True, 0.0, f"color={color}, pose_id={pose_id}")
+            # pick_place_env：水平抓取 + yaw=atan2，pose_id 不参与末端朝向（动作兼容维）
+            _append_event(
+                "pick:start", True, 0.0,
+                f"color={color}, pose_id={pose_id} [compat, yaw=geom]",
+            )
             t0 = time.time()
             ok_flag = _orig_pick(x, y, color, pose_id)
             _append_event("pick:end", ok_flag, time.time() - t0)
             return ok_flag
 
         def _place_diag(x, y, pose_id):
-            _append_event("place:start", True, 0.0, f"pose_id={pose_id}")
+            _append_event(
+                "place:start", True, 0.0,
+                f"pose_id={pose_id} [compat, yaw=geom]",
+            )
             t0 = time.time()
             ok_flag = _orig_place(x, y, pose_id)
             _append_event("place:end", ok_flag, time.time() - t0)
@@ -366,8 +373,8 @@ def test_5_env_reset_step():
                 info_dict.get("place_color"))
             na = env.n_active
             nb_ep = env.n_blocks_ep
-            pose_count = max(1, getattr(env, "pose_id_count", 1))
-            pose_cursor = 0
+            # 动作第 3 维 pose_id：与旧策略维度兼容；当前 env 下末端朝向由 horizontal+atan2 决定，不随 pose_id 变化
+            pose_id_compat = 0.0
             ep_done = False
             ep_trunc = False
             ep_steps = 0
@@ -375,22 +382,19 @@ def test_5_env_reset_step():
                 ep_steps += 1
                 holding = getattr(env, "_holding_color", None)
                 if holding is None:
-                    # 未持物：持续尝试 pick，失败后切换下一个 pose_id
-                    pose_id = pose_cursor % pose_count
-                    pose_cursor += 1
+                    # 未持物：持续尝试 pick（失败则多步重试同一策略；朝向不由 pose_id 控制）
                     action = np.array(
-                        [0.0, float(pick_idx), float(pose_id), 0.0, 0.0],
+                        [0.0, float(pick_idx), pose_id_compat, 0.0, 0.0],
                         dtype=np.float32,
                     )
-                    phase = f"pick pose_id={pose_id}"
+                    phase = "pick"
                 else:
                     # 已持物：执行 place
-                    pose_id = (pose_cursor - 1) % pose_count
                     action = np.array(
-                        [1.0, float(nb_ep + place_idx), float(pose_id), 0.0, 0.0],
+                        [1.0, float(nb_ep + place_idx), pose_id_compat, 0.0, 0.0],
                         dtype=np.float32,
                     )
-                    phase = f"place pose_id={pose_id}"
+                    phase = "place"
 
                 t_step = time.time()
                 _, r_ep, ep_done, ep_trunc, info_ep = env.step(action)
