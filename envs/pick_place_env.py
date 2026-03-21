@@ -201,8 +201,8 @@ MOVEIT_GRIPPER_GRASP_STATE = "middle"
 # 场景简单（2个方块+2个桶+桌面）时，5s 已经足够；过大的 planning_time 反而
 # 让超时报错出现得更晚，调试困难。
 # 关键：MOVEIT_NUM_PLANNING_ATTEMPTS 从 40 降到 8，避免 OMPL 反复探索造成伪延迟。
-MOVEIT_PLANNING_TIME_S = 20
-MOVEIT_NUM_PLANNING_ATTEMPTS = 12
+MOVEIT_PLANNING_TIME_S = 30
+MOVEIT_NUM_PLANNING_ATTEMPTS = 16
 # 默认目标容差略放宽，利于首次规划命中；精定位仍可在 _move_to_xy 的 relaxed 二次尝试中收紧/放宽
 MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.016
 MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD = 0.15
