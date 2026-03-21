@@ -124,7 +124,7 @@ SPAWN_PARK_Y0 = 0.0
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
-#   TABLE_Z + APPROACH_H = 0.18m（高于桶顶2cm，便于抬起后验证）
+#   TABLE_Z + APPROACH_H = 0.22m（高于桶顶约 10cm，便于抬起后验证与 TCP/方块 COM 偏差）
 # ──────────────────────────────────────────────────────────
 TABLE_Z       = 0.00   # 桌面顶面（world文件里桌面顶面在 z=0）
 BLOCK_H       = 0.05   # 方块高度（与 world 中 5cm 立方体一致）
@@ -133,7 +133,7 @@ BIN_H         = 0.12   # 垃圾桶高度（外高）
 BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 
-APPROACH_H    = 0.18   # 接近高度（末端 z = 0.18m）
+APPROACH_H    = 0.22   # 接近/抬起安全高度（末端 z = TABLE_Z + APPROACH_H）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面。在 0.03 基础上再 +1.5cm 以减轻偏低问题。
 GRASP_H       = 0.065  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，较 0.045 再 +2cm）
@@ -141,6 +141,15 @@ GRASP_H       = 0.065  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，
 PRE_GRASP_CLEAR_Z = 0.02  # 在方块顶面上方预留的间隙（米），再落爪
 
 PLACE_H       = 0.11   # 放置高度（末端 z = 0.11m，接近桶口内部）
+
+# 抓取后「是否已离地可搬运」的验证：方块中心 z 须高于此值（米）。
+# 旧版用 TABLE_Z+BIN_H+0.02≈0.14，等价于要求 COM 高于桶口；水平侧抓时 COM 常在 0.10~0.12 即已离地，
+# 会误判失败并在验证前开爪。此处仅验证「已抬起」而非「高于桶口」（入桶由 place 后 _check_done 判定）。
+PICK_LIFT_VERIFY_Z = TABLE_Z + 0.10
+# 抬起后若方块 COM 仍低于 14cm（world z），再尝试一次「绕末端局部 X 的小 pitch」抬腕辅助。
+PICK_LIFT_ASSIST_Z = TABLE_Z + 0.14
+# 抬腕辅助：绕末端局部 X 轴（弧度），约 7°；若方块 z 反降可调小或改符号。
+PICK_LIFT_ASSIST_PITCH_RAD = 0.12
 
 # 抓取时笛卡尔目标修正（米）：MoveIt 的 ee_link/TCP 常与「两指中间平面」有偏差；若 URDF 把 TCP 放在
 # 指尖外侧，直接以方块中心为 IK 目标会表现为「伸得太外、方块在指尖/连杆下」。沿「基座→方块」
@@ -181,6 +190,20 @@ MOVEIT_GRIPPER_GRASP_STATE = "middle"
 # Gazebo模型名称约定：{color}_block, {color}_bin
 def block_name(color: str) -> str: return f"{color}_block"
 def bin_name(color: str)   -> str: return f"{color}_bin"
+
+
+def _quat_multiply(
+    qa: Tuple[float, float, float, float], qb: Tuple[float, float, float, float]
+) -> Tuple[float, float, float, float]:
+    """Hamilton 乘积 q_a * q_b（与 _pose_horizontal 中乘法一致）。"""
+    ax, ay, az, aw = qa
+    bx, by, bz, bw = qb
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
 
 
 class SagittariusPickPlaceEnv(gym.Env):
@@ -956,6 +979,13 @@ class SagittariusPickPlaceEnv(gym.Env):
         rw = qz_w*qy_w - qz_x*qy_x - qz_y*qy_y - qz_z*qy_z
         return (rx, ry, rz, rw)
 
+    def _pose_horizontal_lift_assist(self, yaw: float) -> tuple:
+        """水平侧向姿态上叠加绕末端局部 X 轴的小 pitch（q_pitch * q_horizontal），利于抬高方块 COM z。"""
+        half = float(PICK_LIFT_ASSIST_PITCH_RAD) * 0.5
+        q_p = (math.sin(half), 0.0, 0.0, math.cos(half))
+        q_h = self._pose_horizontal(yaw)
+        return _quat_multiply(q_p, q_h)
+
     def _move_to_xy(self, x: float, y: float, z: float, yaw: float = 0.0,
                     ignore_block_color: str = None,
                     orientation_mode: str = "horizontal") -> bool:
@@ -966,6 +996,7 @@ class SagittariusPickPlaceEnv(gym.Env):
           - "horizontal"（默认）：水平侧向抓取，末端平行桌面，朝向由 yaw 决定。
             这是与实物验证一致的稳定姿态（参照图3），消除了多候选轮询导致的乱动。
             规划失败时只做一次容差放宽重试，不换姿态。
+          - "horizontal_lift_assist"：在 horizontal 基础上叠加小 pitch（抓取后抬腕辅助）。
           - "yaw"：纯绕世界 Z 的 yaw（末端仍朝上，用于放置时的垂直下放）。
 
         避障：通过 MoveIt PlanningScene 中的桌面 + 方块 + 桶碰撞体自动避障。
@@ -977,6 +1008,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         # ── 计算目标姿态四元数 ────────────────────────────────────────────
         if orientation_mode == "horizontal":
             qx, qy, qz, qw = self._pose_horizontal(yaw)
+        elif orientation_mode == "horizontal_lift_assist":
+            qx, qy, qz, qw = self._pose_horizontal_lift_assist(yaw)
         else:
             qx, qy, qz, qw = self._pose_for_yaw(yaw)
 
@@ -1087,12 +1120,10 @@ class SagittariusPickPlaceEnv(gym.Env):
           末端从底座方向水平朝向方块，平行地面插入，稳定不乱动。
 
         三步下降（避免从高空直线扫过方块）：
-          1. APPROACH_H：安全高度接近（高于所有障碍物）
+          1. APPROACH_H：安全高度接近（高于桶与方块，当前 TABLE_Z+APPROACH_H）
           2. pre_z：方块顶面上方 PRE_GRASP_CLEAR_Z
           3. GRASP_H：抓取位（方块中部）
         """
-        LIFT_VERIFY_Z = TABLE_Z + BIN_H + 0.02
-
         # TCP 反向收一点，使两指中心对准方块中心
         gx, gy = self._grasp_tcp_xy_from_block_center(x, y)
 
@@ -1126,24 +1157,38 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         self._close_gripper()
 
-        # 4. 抬起到安全高度（持块状态，场景里仍有其他碰撞体）
-        if not self._move_to_xy(
+        # 4. 抬起到安全高度（持 middle 夹持，不在此处开爪）
+        lift_ok = self._move_to_xy(
             gx, gy, TABLE_Z + APPROACH_H, yaw,
             ignore_block_color=color, orientation_mode="horizontal",
-        ):
+        )
+        block_z = float(self._get_pose(block_name(color))[2])
+
+        # 方块 COM 仍低于 14cm（world z）时：同高度下做一次抬腕辅助，抬高方块 z 以利通过 PICK_LIFT_VERIFY_Z
+        if block_z < PICK_LIFT_ASSIST_Z:
+            rospy.loginfo(
+                f"[Env] 抓取后方块 z={block_z:.4f} < PICK_LIFT_ASSIST_Z={PICK_LIFT_ASSIST_Z:.4f}，"
+                f"尝试抬腕辅助 (pitch={PICK_LIFT_ASSIST_PITCH_RAD:.3f} rad)")
+            assist_ok = self._move_to_xy(
+                gx, gy, TABLE_Z + APPROACH_H, yaw,
+                ignore_block_color=color, orientation_mode="horizontal_lift_assist",
+            )
+            if not assist_ok:
+                rospy.logwarn("[Env] 抬腕辅助规划/执行失败，沿用抬升后姿态继续验证")
+            block_z = float(self._get_pose(block_name(color))[2])
+
+        # MoveIt execute 可能误报 False，但仿真里臂已到位；若高度已达标则继续持块→attach→后续 place 再开爪
+        if block_z < PICK_LIFT_VERIFY_Z:
+            rospy.logwarn(
+                f"[Env] 抓取验证失败 {color}_block: z={block_z:.4f} "
+                f"< PICK_LIFT_VERIFY_Z={PICK_LIFT_VERIFY_Z:.4f}（未离地），开爪放弃")
             self._open_gripper()
             self._holding_color = None
             return False
 
-        # 5. 物理验证：方块 z 应高于桶口
-        block_z = self._get_pose(block_name(color))[2]
-        if block_z < LIFT_VERIFY_Z:
+        if not lift_ok:
             rospy.logwarn(
-                f"[Env] 抓取验证失败 {color}_block: z={block_z:.4f} "
-                f"< 阈值 {LIFT_VERIFY_Z:.4f}，开爪放弃")
-            self._open_gripper()
-            self._holding_color = None
-            return False
+                "[Env] 抬升路径曾返回 False，但方块高度已达标，保持夹持并继续（middle）")
 
         self._holding_color = color
         self._attach_held_block_to_scene(color)
