@@ -4,9 +4,9 @@
 test_all.py  (v3 — VLM 感知升级版)
 =====================================
 变化：
+  - Test 5：A reset 体检 → B 奖励方向 → D 理想分阶段(开爪~抬离) → C 闭环冒烟；可加 --test5-auto
   - Test 6 升级为 VLM 感知测试（替代 HSV 分区检测）
   - Test 7 保持 LLM API 连接测试
-  - 其余测试与上一版本一致
 """
 
 import sys
@@ -160,9 +160,146 @@ def test_4_color_config():
         fail(f"颜色配置失败: {e}"); traceback.print_exc(); return False
 
 
+def _test5_pause(interactive: bool, msg: str) -> None:
+    """交互模式下在终端按 Enter 再进入下一步；--test5-auto 时跳过。"""
+    if not interactive:
+        return
+    print(f"\n{BLUE}{'─'*56}{RESET}")
+    print(f"  {YELLOW}{msg}{RESET}")
+    input(f"  {BOLD}按 Enter 继续…{RESET} ")
+
+
+def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
+    """
+    与 pick_place_env._execute_pick / _execute_place 等价的理想分阶段流程：
+    开爪 → 方块上方 → 预降 → 抓取高度 → 夹持 → 抬起验证 → 桶上方 → 下放 → 开爪释放 → 抬离
+    使用 Gazebo GT；每步前可暂停观察。
+    """
+    import math
+
+    env.reset()
+    env._refresh_positions()
+    pick_c = env.pick_color
+    place_c = env.place_color
+    tz = float(ppe_mod.TABLE_Z)
+    info(f"\n{BOLD}── D：理想分阶段操控（与 env 原语一致）──{RESET}")
+    info(f"  任务 pick={pick_c} → place={place_c}")
+
+    pb = env._get_pose(ppe_mod.block_name(pick_c))
+    bx, by = float(pb[0]), float(pb[1])
+    gx, gy = env._grasp_tcp_xy_from_block_center(bx, by)
+    yaw = math.atan2(gy - ppe_mod.ARM_BASE_Y, gx - ppe_mod.ARM_BASE_X)
+    pre_z = tz + ppe_mod.BLOCK_H + ppe_mod.PRE_GRASP_CLEAR_Z
+    lift_verify_z = tz + ppe_mod.BIN_H + 0.02
+
+    def _m(label: str, fn) -> bool:
+        _test5_pause(interactive, label)
+        ok_flag = fn()
+        if ok_flag:
+            ok(f"  {label} → OK")
+        else:
+            warn(f"  {label} → 失败")
+        return ok_flag
+
+    def _do_open():
+        env._open_gripper()
+        return True
+
+    def _do_close():
+        env._close_gripper()
+        return True
+
+    if not _m("D-1 开爪", _do_open):
+        return False
+
+    if not _m(
+        f"D-2 移至方块上方安全高度 z={tz + ppe_mod.APPROACH_H:.3f}",
+        lambda: env._move_to_xy(
+            gx, gy, tz + ppe_mod.APPROACH_H, yaw,
+            ignore_block_color=pick_c, orientation_mode="horizontal",
+        ),
+    ):
+        return False
+    if not _m(
+        f"D-3 预降至方块顶面上方 z={pre_z:.3f}",
+        lambda: env._move_to_xy(
+            gx, gy, pre_z, yaw,
+            ignore_block_color=pick_c, orientation_mode="horizontal",
+        ),
+    ):
+        return False
+    if not _m(
+        f"D-4 落至抓取高度 z={tz + ppe_mod.GRASP_H:.3f}",
+        lambda: env._move_to_xy(
+            gx, gy, tz + ppe_mod.GRASP_H, yaw,
+            ignore_block_color=pick_c, orientation_mode="horizontal",
+        ),
+    ):
+        return False
+    if not _m("D-5 夹爪夹持（middle）", _do_close):
+        return False
+    if not _m(
+        f"D-6 抬升至安全高度 z={tz + ppe_mod.APPROACH_H:.3f}",
+        lambda: env._move_to_xy(
+            gx, gy, tz + ppe_mod.APPROACH_H, yaw,
+            ignore_block_color=pick_c, orientation_mode="horizontal",
+        ),
+    ):
+        env._open_gripper()
+        return False
+
+    block_z = float(env._get_pose(ppe_mod.block_name(pick_c))[2])
+    if block_z < lift_verify_z:
+        warn(f"  D-7 抓取验证失败: block z={block_z:.4f} < {lift_verify_z:.4f}")
+        env._open_gripper()
+        env._holding_color = None
+        return False
+    env._holding_color = pick_c
+    env._attach_held_block_to_scene(pick_c)
+    ok(f"  D-7 抓取验证通过 (z={block_z:.4f})，已 attach 至规划场景")
+
+    bin_xyz = env._get_pose(ppe_mod.bin_name(place_c))
+    px, py = float(bin_xyz[0]), float(bin_xyz[1])
+    yaw_p = math.atan2(py - ppe_mod.ARM_BASE_Y, px - ppe_mod.ARM_BASE_X)
+
+    if not _m(
+        f"D-8 移至目标桶上方安全高度 z={tz + ppe_mod.APPROACH_H:.3f}",
+        lambda: env._move_to_xy(
+            px, py, tz + ppe_mod.APPROACH_H, yaw_p, orientation_mode="horizontal",
+        ),
+    ):
+        return False
+    if not _m(
+        f"D-9 下放至桶口放置高度 z={tz + ppe_mod.PLACE_H:.3f}",
+        lambda: env._move_to_xy(
+            px, py, tz + ppe_mod.PLACE_H, yaw_p, orientation_mode="horizontal",
+        ),
+    ):
+        return False
+
+    _test5_pause(interactive, "D-10 开爪释放方块")
+    env._open_gripper()
+    held = env._holding_color
+    if held:
+        env._detach_held_block_from_scene(held)
+    env._holding_color = None
+    ok("  D-10 开爪并已 detach")
+
+    _test5_pause(interactive, "D-11 抬离桶口（回到安全高度）")
+    env._move_to_xy(
+        px, py, tz + ppe_mod.APPROACH_H, yaw_p, orientation_mode="horizontal",
+    )
+    ok("  D 段分阶段流程结束")
+    return True
+
+
 # ── Test 5: 环境 reset/step ───────────────────────────────────────────────────
-def test_5_env_reset_step():
-    section("Test 5: 环境综合体检（reset稳定性 + 奖励方向 + 闭环冒烟）")
+def test_5_env_reset_step(interactive: bool = True):
+    """
+    环境综合体检：A reset → B 奖励 step → D 理想分阶段操控 → C 闭环 step。
+    interactive：Enter 逐步；--test5-auto 连续运行。
+    """
+    section("Test 5: 环境综合体检（A reset / B 奖励 / D 分阶段 / C 闭环）")
     try:
         import envs.pick_place_env as ppe_mod
         from envs.pick_place_env import SagittariusPickPlaceEnv
@@ -258,6 +395,10 @@ def test_5_env_reset_step():
         env._execute_pick = _pick_diag
         env._execute_place = _place_diag
 
+        info("MoveIt：planning_time≈30s；位置容差≈12mm、姿态≈0.12rad（见 pick_place_env._init_ros）")
+        info("观测噪声 σ≈3cm 仅进入 obs，不进入 step 执行；执行目标=Gazebo GT。")
+        _test5_pause(interactive, "即将开始 A：多次 reset 场景体检（不移动机械臂）")
+
         # ── A. reset稳定性与随机场景体检（多次）────────────────────────────
         n_reset = 3
         spacing_violations = 0
@@ -315,6 +456,11 @@ def test_5_env_reset_step():
                         unreachable_count += 1
                         warn(f"  reset#{ridx+1} {c}_bin   GT位置超出可达域: {zp}")
 
+            _test5_pause(
+                interactive,
+                f"A 段：已完成 reset#{ridx+1}/{n_reset}；若需检查 Gazebo 与终端坐标，可对照上面各 _block GT。",
+            )
+
         if spacing_violations == 0:
             ok(f"{n_reset} 次 reset：物体间距检查通过（阈值 0.10m）")
         else:
@@ -330,24 +476,40 @@ def test_5_env_reset_step():
         place_color = info_dict.get("place_color")
         info(f"用于 step 检查: pick={pick_color}, place={place_color}, active={active}")
 
+        def _print_gt_block(color: str):
+            p = env._get_pose(f"{color}_block")
+            info(f"  Gazebo GT {color}_block: xy=({p[0]:.4f},{p[1]:.4f}) z={p[2]:.4f} m")
+
+        _test5_pause(interactive, "B 段：将执行「正确 pick」与「错误 pick」。开始前核对 GT 与目标是否一致。")
+        for c in env._active_block_colors:
+            _print_gt_block(c)
+
         # ── B. 奖励方向检查：正确 pick vs 错误 pick ───────────────────────
         info("\n奖励方向检查：正确 pick vs 错误 pick")
         pick_idx = env._active_block_colors.index(pick_color)
         action_correct = np.array(
             [0.0, float(pick_idx), 0.0, 0.0, 0.0], dtype=np.float32)
+        info(f"  发送动作（正确 pick）: primitive=0, obj_idx={pick_idx}, res=0,0")
+        _test5_pause(interactive, "即将 env.step(正确 pick) — 将开始 MoveIt 规划")
         t0 = time.time()
         obs2, r_correct, done, trunc, info2 = env.step(action_correct)
+        info(f"  info['target_xy']={info2.get('target_xy')}（应与 {pick_color}_block 的 GT xy 一致）")
         ok(f"  正确颜色 pick: reward={r_correct:.4f}  "
            f"success={info2.get('success')}  ({time.time()-t0:.1f}s)")
         if not info2.get("success"):
             _dump_recent_events("  正确 pick 失败，最近阶段记录：")
 
+        _test5_pause(interactive, "B 段：正确 pick 已结束。若失败请对照上方 move 阶段与 GT。")
+
         nb_ep = env.n_blocks_ep
         wrong_idx = (pick_idx + 1) % nb_ep   # 选一个不同的方块槽位
         action_wrong = np.array(
             [0.0, float(wrong_idx), 0.0, 0.0, 0.0], dtype=np.float32)
+        info(f"  发送动作（错误 pick）: obj_idx={wrong_idx}（非任务 pick 色）")
+        _test5_pause(interactive, "即将 env.step(错误 pick)")
         t0 = time.time()
         obs3, r_wrong, done2, trunc2, info3 = env.step(action_wrong)
+        info(f"  info['target_xy']={info3.get('target_xy')}")
         ok(f"  错误颜色 pick: reward={r_wrong:.4f}  "
            f"success={info3.get('success')}  ({time.time()-t0:.1f}s)")
         if not info3.get("success"):
@@ -357,14 +519,42 @@ def test_5_env_reset_step():
             ok(f"  奖励结构正确：错误颜色 {r_wrong:.4f} ≤ 正确颜色 {r_correct:.4f}")
         else:
             warn(f"  奖励可能异常：错误颜色 {r_wrong:.4f} > 正确颜色 {r_correct:.4f}")
-            warn("  这可能是因为正确颜色方块刚好距离 action 点更远（属于正常噪声）")
-            warn("  多次运行或运行更多 episode 再判断")
+            warn("  若执行已改用 GT，此项多来自观测噪声或奖励设计，可多跑几次对照。")
+
+        # ── D. 理想分阶段：移动 → 预降 → 落爪 → 夹持 → 抬起 → 桶上方 → 下放 → 释放
+        info("\n恢复 env 原始原语（去掉诊断包装），用于 D 段逐步执行…")
+        env._move_to_xy = _orig_move
+        env._open_gripper = _orig_open
+        env._close_gripper = _orig_close
+        env._execute_pick = _orig_pick
+        env._execute_place = _orig_place
+
+        _test5_pause(
+            interactive,
+            "B 段结束。即将进入 D：按「开爪→方块上方→预降→抓取高→夹持→抬起→"
+            "桶上方→下放→开爪→抬离」分步执行（与 _execute_pick/_execute_place 一致）。",
+        )
+        if not _test5_run_ideal_phases(env, ppe_mod, interactive):
+            warn("D 段未全部成功（某步规划/执行失败）")
+
+        info("重新挂上 MoveIt 阶段诊断包装，供 C 段使用…")
+        env._move_to_xy = _move_diag
+        env._open_gripper = _open_diag
+        env._close_gripper = _close_diag
+        env._execute_pick = _pick_diag
+        env._execute_place = _place_diag
+
+        _test5_pause(interactive, "D 段结束。即将进入 C：闭环冒烟（env.step 整段 pick/place）。")
 
         # ── C. 闭环冒烟：单回合执行到 done/trunc，再进入下一回合 ─────────────
         info("\n闭环冒烟测试（每回合执行到 done/trunc，最多 3 回合）")
         closed_loop_ok = 0
         closed_loop_trials = 3
         for k in range(closed_loop_trials):
+            _test5_pause(
+                interactive,
+                f"C 段：开始第 {k+1}/{closed_loop_trials} 回合（将 env.reset）",
+            )
             obs, info_dict = env.reset()
             active = list(info_dict.get("active_colors", env._active_colors))
             pick_idx = env._active_block_colors.index(
@@ -396,8 +586,17 @@ def test_5_env_reset_step():
                     )
                     phase = "place"
 
+                pc = info_dict.get("pick_color")
+                if phase == "pick" and pc:
+                    gp = env._get_pose(f"{pc}_block")
+                    info(f"  本步 pick 前 GT {pc}_block: ({gp[0]:.4f},{gp[1]:.4f},{gp[2]:.4f})")
+                _test5_pause(
+                    interactive,
+                    f"回合{k+1} step{ep_steps} 将执行: {phase}（Enter 发送 env.step）",
+                )
                 t_step = time.time()
                 _, r_ep, ep_done, ep_trunc, info_ep = env.step(action)
+                info(f"    → target_xy={info_ep.get('target_xy')}  success={info_ep.get('success')}")
                 info(f"  回合{k+1} step{ep_steps:02d} {phase:16s}  "
                      f"success={info_ep.get('success')}  "
                      f"done={ep_done} trunc={ep_trunc}  "
@@ -605,6 +804,11 @@ TESTS = {
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--test", type=int, default=None)
+    p.add_argument(
+        "--test5-auto",
+        action="store_true",
+        help="仅 Test5：不暂停，连续跑完（跑全部测试时请加上，避免每步按 Enter）",
+    )
     args = p.parse_args()
 
     print(f"\n{BOLD}{'═'*60}{RESET}")
@@ -624,7 +828,10 @@ def main():
             print(f"无效编号 {args.test}，范围 1-{len(TESTS)}")
             sys.exit(1)
         name, fn = TESTS[args.test]
-        result   = fn()
+        if args.test == 5:
+            result = test_5_env_reset_step(interactive=not args.test5_auto)
+        else:
+            result = fn()
         print(f"\n  结果: {GREEN+'PASS'+RESET if result else RED+'FAIL'+RESET}")
         sys.exit(0 if result else 1)
 
@@ -632,7 +839,10 @@ def main():
     for num in sorted(TESTS.keys()):
         name, fn = TESTS[num]
         try:
-            passed = fn()
+            if num == 5:
+                passed = test_5_env_reset_step(interactive=False)
+            else:
+                passed = fn()
         except KeyboardInterrupt:
             print(f"\n{YELLOW}中断{RESET}"); break
         except Exception as e:

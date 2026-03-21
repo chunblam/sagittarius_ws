@@ -33,7 +33,7 @@ import sys
 import time
 import math
 import itertools
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 import numpy as np
 import gymnasium as gym
@@ -120,7 +120,7 @@ SPAWN_PARK_Y0 = 0.0
 # GRASP_H 修正：
 #   方块顶面在 z = TABLE_Z + BLOCK_H（5cm 立方体时 0.05m）
 #   末端目标约在方块中部附近：TABLE_Z + GRASP_H ≈ TABLE_Z + BLOCK_H/2 + 小裕量
-#   当前 GRASP_H=0.045 → TABLE_Z+0.045（相对原 0.03 抬高 1.5cm，可按 TCP 再微调）
+#   当前 GRASP_H=0.065 → TABLE_Z+0.065（再抬高 2cm，可按 TCP 再微调）
 #
 # APPROACH_H 修正：
 #   接近高度必须明显高于最高物体（桶高0.12m）加安全裕量
@@ -136,7 +136,7 @@ BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 APPROACH_H    = 0.18   # 接近高度（末端 z = 0.18m）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面。在 0.03 基础上再 +1.5cm 以减轻偏低问题。
-GRASP_H       = 0.045  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系）
+GRASP_H       = 0.065  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，较 0.045 再 +2cm）
 # 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
 PRE_GRASP_CLEAR_Z = 0.02  # 在方块顶面上方预留的间隙（米），再落爪
 
@@ -167,7 +167,10 @@ TCP_HORIZONTAL_BASE_QUAT = (0.0, 0.7071067811865476, 0.0, 0.7071067811865476)
 
 # 图像crop参数
 CROP_SIZE     = 28
-POSITION_NOISE_SIGMA = 0.030   # 稍微降低噪声，6→3颜色后精度可以提高
+# 仅加在「观测向量」的 block/bin 平面坐标上（模拟视觉/标定误差），不写入执行路径。
+# 典型幅度：σ=0.03m → 约 95% 落在真值 ±6cm 内；真机同样有检测噪声，可改小 σ 做消融。
+# step() 中运动目标使用 Gazebo GT，不受此项影响。
+POSITION_NOISE_SIGMA = 0.030
 
 # MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
 MOVEIT_ARM_HOME_STATE = "home"
@@ -320,14 +323,14 @@ class SagittariusPickPlaceEnv(gym.Env):
             self._moveit_gripper = moveit_commander.MoveGroupCommander(
                 "sagittarius_gripper")
 
-        self._moveit_arm.set_goal_position_tolerance(0.008)
-        self._moveit_arm.set_goal_orientation_tolerance(0.08)
-        self._moveit_arm.set_max_velocity_scaling_factor(0.4)
-        self._moveit_arm.set_max_acceleration_scaling_factor(0.4)
+        # 位置容差单位：米（0.012 = 12mm，非 cm）。姿态容差：弧度（约 0.12rad ≈ 6.9°）
+        self._moveit_arm.set_goal_position_tolerance(0.012)
+        self._moveit_arm.set_goal_orientation_tolerance(0.12)
+        self._moveit_arm.set_max_velocity_scaling_factor(0.5)
+        self._moveit_arm.set_max_acceleration_scaling_factor(0.5)
         self._moveit_arm.allow_replanning(True)
-        # 单次规划时间不宜过长；失败时由 _move_to_xy 内多策略重试（见下）
-        self._moveit_arm.set_planning_time(5.0)
-        self._moveit_arm.set_num_planning_attempts(12)
+        self._moveit_arm.set_planning_time(30.0)
+        self._moveit_arm.set_num_planning_attempts(16)
         self._moveit_gripper.set_goal_joint_tolerance(0.001)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。
@@ -795,14 +798,17 @@ class SagittariusPickPlaceEnv(gym.Env):
     # ── 带噪声的位置获取 ─────────────────────────────────────────────────────
 
     def _refresh_positions(self):
-        """刷新激活颜色物体的带噪声位置缓存（每次step调用）。"""
-        noise = lambda: np.random.normal(0, self.noise_sigma, 2)
+        """从 Gazebo 刷新方块/桶的平面位置缓存（无噪声，与 model_states 一致）。
+
+        观测中的位置噪声仅在 _build_observation 构造向量时叠加；step/奖励/运动执行
+        必须使用此处 GT，否则会与 Gazebo 中物体中心不一致导致对不准。
+        """
         for color in self._active_block_colors:
             xyz = self._get_pose(block_name(color))
-            self._block_positions[color] = xyz[:2] + noise()
+            self._block_positions[color] = np.array(xyz[:2], dtype=np.float32)
         for color in self._active_bin_colors:
             xyz = self._get_pose(bin_name(color))
-            self._bin_positions[color]   = xyz[:2] + noise()
+            self._bin_positions[color] = np.array(xyz[:2], dtype=np.float32)
 
     def _get_block_pos(self, color: str) -> np.ndarray:
         return self._block_positions.get(
@@ -814,9 +820,11 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     # ── Observation构建 ──────────────────────────────────────────────────────
 
-    def _build_crops(self) -> np.ndarray:
+    def _build_crops(self, block_xy_slots: Optional[List[np.ndarray]] = None) -> np.ndarray:
         """
         提取方块槽位对应的图像 crop（SLOT_COUNT 行；空槽为黑图）。
+        block_xy_slots：每槽用于取图的平面坐标（通常为 GT+噪声，与 obs 中 block_pos 一致）；
+        为 None 时退回 GT+噪声（与旧行为一致）。
         返回形状 (SLOT_COUNT, 3, 28, 28)
         """
         import cv2
@@ -826,7 +834,11 @@ class SagittariusPickPlaceEnv(gym.Env):
         for slot in range(SLOT_COUNT):
             if slot < len(self._active_block_colors):
                 color = self._active_block_colors[slot]
-                block_pos = self._get_block_pos(color)
+                if block_xy_slots is not None:
+                    block_pos = block_xy_slots[slot]
+                else:
+                    block_pos = self._get_block_pos(color) + np.random.normal(
+                        0, self.noise_sigma, 2).astype(np.float32)
                 if img is not None:
                     u, v = self._robot_to_pixel(block_pos)
                     h, w = img.shape[:2]
@@ -861,22 +873,26 @@ class SagittariusPickPlaceEnv(gym.Env):
         """
         self._refresh_positions()
 
-        crops = self._build_crops()   # (SLOT_COUNT, 3, 28, 28)
-
-        bp_list = []
+        # 观测：GT + 高斯噪声（仅用于策略输入；crops 与 block_pos 向量共用同一组噪声）
+        noise2 = lambda: np.random.normal(0, self.noise_sigma, 2).astype(np.float32)
+        bp_list: List[np.ndarray] = []
         for slot in range(SLOT_COUNT):
             if slot < len(self._active_block_colors):
-                bp_list.append(self._get_block_pos(self._active_block_colors[slot]))
+                c = self._active_block_colors[slot]
+                bp_list.append(self._get_block_pos(c) + noise2())
             else:
                 bp_list.append(np.zeros(2, dtype=np.float32))
-        block_pos = np.array(bp_list, dtype=np.float32).flatten()
 
-        bn_list = []
+        bn_list: List[np.ndarray] = []
         for slot in range(SLOT_COUNT):
             if slot < len(self._active_bin_colors):
-                bn_list.append(self._get_bin_pos(self._active_bin_colors[slot]))
+                c = self._active_bin_colors[slot]
+                bn_list.append(self._get_bin_pos(c) + noise2())
             else:
                 bn_list.append(np.zeros(2, dtype=np.float32))
+
+        crops = self._build_crops(block_xy_slots=bp_list)   # (SLOT_COUNT, 3, 28, 28)
+        block_pos = np.array(bp_list, dtype=np.float32).flatten()
         bin_pos = np.array(bn_list, dtype=np.float32).flatten()
 
         gripper = np.array(
@@ -1010,8 +1026,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 只放宽方向容差，不换姿态类型，保持末端动作一致性
         orig_pos_tol  = self._moveit_arm.get_goal_position_tolerance()
         orig_ort_tol  = self._moveit_arm.get_goal_orientation_tolerance()
-        self._moveit_arm.set_goal_position_tolerance(0.015)
-        self._moveit_arm.set_goal_orientation_tolerance(0.15)
+        self._moveit_arm.set_goal_position_tolerance(0.022)
+        self._moveit_arm.set_goal_orientation_tolerance(0.20)
         result = _try_plan_execute(x, y, z, qx, qy, qz, qw, "relaxed_tol")
         self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
         self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
@@ -1290,6 +1306,8 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         self._step_count += 1
+        # 执行前用最新 Gazebo 位姿更新 GT，避免与观测/上步不同步导致对不准
+        self._refresh_positions()
 
         # 解码动作
         primitive = int(np.round(np.clip(action[0], 0, 1)))
