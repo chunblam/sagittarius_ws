@@ -99,22 +99,20 @@ def eval_sim(model_path: str, n_episodes: int, task: str,
             obs, r, done, trunc, step_info = env.step(action)
             ep_r  += r
             steps += 1
-            prim  = int(round(float(action[0])))
-            obj_i = int(round(float(action[1])))
-            nb = env.n_blocks_ep
-            if obj_i < nb:
-                c, t_str = env._active_block_colors[obj_i], "block"
-            else:
-                c, t_str = env._active_bin_colors[obj_i - nb], "bin"
-            if len(action) >= 5:
-                pose_id = int(round(float(action[2])))
-                rx, ry = float(action[3]), float(action[4])
-            else:
-                pose_id = 0
-                rx, ry = float(action[2]), float(action[3])
-            print(f"  step {steps}: {['pick','place'][prim]} {c}_{t_str}  "
-                  f"pose_id={pose_id} res=({rx:.3f},{ry:.3f})  "
-                  f"r={r:.3f}  ok={step_info.get('success')}")
+            act = np.asarray(action, dtype=np.float32).reshape(-1)
+            pbi = int(round(float(act[0])))
+            pli = int(round(float(act[1])))
+            pbc = env._active_block_colors[pbi]
+            plc = env._active_bin_colors[pli]
+            pose_id = int(round(float(act[2])))
+            rpx, rpy = float(act[3]), float(act[4])
+            rbx, rby = float(act[5]), float(act[6])
+            print(
+                f"  step {steps}: pick_and_place  {pbc}_block→{plc}_bin  "
+                f"pose_id={pose_id}  res_pick=({rpx:.3f},{rpy:.3f})  "
+                f"res_place=({rbx:.3f},{rby:.3f})  "
+                f"r={r:.3f}  ok={step_info.get('success')}"
+            )
 
         rewards.append(ep_r)
         if done:

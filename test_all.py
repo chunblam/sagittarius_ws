@@ -171,8 +171,8 @@ def _test5_pause(interactive: bool, msg: str) -> None:
 
 def _test5_release_arm_after_pick(env):
     """
-    正确 pick 后 env 处于持块（middle）且 PlanningScene attach，直接再 env.step 抓另一色时
-    MoveIt 常以 START_STATE_IN_COLLISION 中止。去附着、开爪并回 home，恢复无持块状态。
+    B 段「错误 pick_block」测试前：若上一步 pick_and_place 已持块（middle + attach）或
+    抓取成功但未入桶，直接再 env.step 会碰撞。去附着、开爪并回 home，恢复无持块状态。
     """
     held = getattr(env, "_holding_color", None)
     if held:
@@ -195,7 +195,8 @@ def _test5_release_arm_after_pick(env):
 
 def _test5_run_ideal_phases(env, ppe_mod, interactive: bool) -> bool:
     """
-    与 pick_place_env._execute_pick / _execute_place 等价的理想分阶段流程：
+    与 pick_place_env._execute_pick_and_place 内部运动分解等价的理想分阶段流程
+    （单一 pick_and_place 原语；内含 INTER_ROBOT_STAGE_PAUSE_S 间隔）：
     开爪 → 方块上方 → 预降 → 抓取高度 → 夹持 → 抬起验证 → 桶上方 → 下放 → 开爪释放 → 抬离
     使用 Gazebo GT；每步前可暂停观察。
 
@@ -323,12 +324,13 @@ def test_5_env_reset_step(interactive: bool = True):
     """
     环境综合体检：A reset → B 奖励 step → D 理想分阶段操控 → C 闭环 step。
 
-    各段边界处显式 env.reset()；B 段在「正确 pick」与「错误 pick」之间调用
-    _test5_release_arm_after_pick（detach+开爪+home），避免持块再抓他色触发碰撞。
+    动作均为 **7 维 pick_and_place**（与 env._execute_pick_and_place 一致）。
+    各段边界处显式 env.reset()；B 段在「任务对齐」与「错误 pick_block」之间若仍持块则调用
+    _test5_release_arm_after_pick（detach+开爪+home），避免下一 env.step 碰撞。
 
     interactive：Enter 逐步；--test5-auto 连续运行。
     """
-    section("Test 5: 环境综合体检（A reset / B 奖励 / D 分阶段 / C 闭环）")
+    section("Test 5: 环境综合体检（A reset / B 奖励 / D 分阶段 / C 闭环，单原语 pick_and_place）")
     try:
         import envs.pick_place_env as ppe_mod
         from envs.pick_place_env import SagittariusPickPlaceEnv
@@ -339,15 +341,14 @@ def test_5_env_reset_step(interactive: bool = True):
         env = SagittariusPickPlaceEnv(task="short_horizon", max_steps=8)
         na  = env.n_active
         ok("环境创建成功")
-        ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=5")
+        ok(f"  obs_dim={env.obs_dim}  n_active={na}  action_dim=7 (pick_and_place)")
 
         # ── 动作分阶段诊断（用于定位 TIMED_OUT/CONTROL_FAILED 发生在哪一步） ──
         diag = {"events": []}
         _orig_move = env._move_to_xy
         _orig_open = env._open_gripper
         _orig_close = env._close_gripper
-        _orig_pick = env._execute_pick
-        _orig_place = env._execute_place
+        _orig_pp = env._execute_pick_and_place
 
         def _classify_move_stage(z_abs: float) -> str:
             z_rel = float(z_abs - ppe_mod.TABLE_Z)
@@ -397,32 +398,21 @@ def test_5_env_reset_step(interactive: bool = True):
             _orig_close(*args, **kwargs)
             _append_event("gripper:grasp(middle)", True, time.time() - t0)
 
-        def _pick_diag(x, y, color, pose_id):
-            # pick_place_env：水平抓取 + yaw=atan2，pose_id 不参与末端朝向（动作兼容维）
+        def _pp_diag(pick_x, pick_y, pick_color, place_x, place_y, pose_id):
             _append_event(
-                "pick:start", True, 0.0,
-                f"color={color}, pose_id={pose_id} [compat, yaw=geom]",
+                "pick_and_place:start", True, 0.0,
+                f"pick={pick_color}, pose_id={pose_id} [单原语连续链]",
             )
             t0 = time.time()
-            ok_flag = _orig_pick(x, y, color, pose_id)
-            _append_event("pick:end", ok_flag, time.time() - t0)
-            return ok_flag
-
-        def _place_diag(x, y, pose_id):
-            _append_event(
-                "place:start", True, 0.0,
-                f"pose_id={pose_id} [compat, yaw=geom]",
-            )
-            t0 = time.time()
-            ok_flag = _orig_place(x, y, pose_id)
-            _append_event("place:end", ok_flag, time.time() - t0)
-            return ok_flag
+            ret = _orig_pp(pick_x, pick_y, pick_color, place_x, place_y, pose_id)
+            ok_m = bool(ret.get("done"))
+            _append_event("pick_and_place:end", ok_m, time.time() - t0, str(ret))
+            return ret
 
         env._move_to_xy = _move_diag
         env._open_gripper = _open_diag
         env._close_gripper = _close_diag
-        env._execute_pick = _pick_diag
-        env._execute_place = _place_diag
+        env._execute_pick_and_place = _pp_diag
 
         info("MoveIt：planning_time 与尝试次数见 pick_place_env.MOVEIT_PLANNING_TIME_S / "
              "MOVEIT_NUM_PLANNING_ATTEMPTS；位置容差≈12mm、姿态≈0.12rad")
@@ -513,45 +503,56 @@ def test_5_env_reset_step(interactive: bool = True):
             p = env._get_pose(f"{color}_block")
             info(f"  Gazebo GT {color}_block: xy=({p[0]:.4f},{p[1]:.4f}) z={p[2]:.4f} m")
 
-        _test5_pause(interactive, "B 段：将执行「正确 pick」与「错误 pick」。开始前核对 GT 与目标是否一致。")
+        _test5_pause(interactive, "B 段：将执行「任务对齐 pick_and_place」与「错误 pick_block」。开始前核对 GT 与目标是否一致。")
         for c in env._active_block_colors:
             _print_gt_block(c)
 
-        # ── B. 奖励方向检查：正确 pick → 释放持块状态 → 错误 pick ─────────────
-        info("\n奖励方向检查：正确 pick vs 错误 pick")
+        # ── B. 奖励方向检查：任务对齐 pick_and_place → 必要时释放 → 错误 pick_block ──
+        info("\n奖励方向检查：任务对齐 pick_and_place vs 错误 pick_block（整步单原语）")
         pick_idx = env._active_block_colors.index(pick_color)
+        place_idx = env._active_bin_colors.index(place_color)
         action_correct = np.array(
-            [0.0, float(pick_idx), 0.0, 0.0, 0.0], dtype=np.float32)
-        info(f"  发送动作（正确 pick）: primitive=0, obj_idx={pick_idx}, res=0,0")
-        _test5_pause(interactive, "即将 env.step(正确 pick) — 将开始 MoveIt 规划")
+            [float(pick_idx), float(place_idx), 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=np.float32,
+        )
+        info(f"  发送动作（任务对齐 pick_and_place）: pick_idx={pick_idx}, place_idx={place_idx}, res=0")
+        _test5_pause(interactive, "即将 env.step(任务对齐 pick_and_place) — MoveIt 连续规划")
         t0 = time.time()
         obs2, r_correct, done, trunc, info2 = env.step(action_correct)
-        info(f"  info['target_xy']={info2.get('target_xy')}（应与 {pick_color}_block 的 GT xy 一致）")
-        ok(f"  正确颜色 pick: reward={r_correct:.4f}  "
+        info(f"  info['pick_xy']={info2.get('pick_xy')}（应与 {pick_color}_block 的 GT xy 一致）")
+        ok(f"  任务对齐 pick_and_place: reward={r_correct:.4f}  "
            f"success={info2.get('success')}  ({time.time()-t0:.1f}s)")
         if not info2.get("success"):
-            _dump_recent_events("  正确 pick 失败，最近阶段记录：")
+            _dump_recent_events("  正确 pick_and_place 失败，最近阶段记录：")
 
-        _test5_pause(interactive, "B 段：正确 pick 已结束。若失败请对照上方 move 阶段与 GT。")
+        _test5_pause(interactive, "B 段：任务对齐 pick_and_place 已结束。若失败请对照上方 move 阶段与 GT。")
 
-        # 成功 pick 后处于持块+attach，直接再抓另一色会 START_STATE_IN_COLLISION：先释放再测错误 pick
+        # 若整段任务已成功（done），需 reset 后再测「错误抓取色」；否则持块/场景状态会纠缠
         if info2.get("success") or getattr(env, "_holding_color", None):
-            info("  释放持块状态（PlanningScene detach + 开爪 + 回 home），再执行错误 pick…")
-            _test5_release_arm_after_pick(env)
+            info("  释放场景（若已持块则 detach+home）并 reset，再执行错误 pick_block…")
+            if getattr(env, "_holding_color", None):
+                _test5_release_arm_after_pick(env)
+            obs, info_dict = env.reset()
+            pick_color = info_dict.get("pick_color")
+            place_color = info_dict.get("place_color")
+            pick_idx = env._active_block_colors.index(pick_color)
+            place_idx = env._active_bin_colors.index(place_color)
 
         nb_ep = env.n_blocks_ep
         wrong_idx = (pick_idx + 1) % nb_ep   # 选一个不同的方块槽位
         action_wrong = np.array(
-            [0.0, float(wrong_idx), 0.0, 0.0, 0.0], dtype=np.float32)
-        info(f"  发送动作（错误 pick）: obj_idx={wrong_idx}（非任务 pick 色）")
-        _test5_pause(interactive, "即将 env.step(错误 pick)")
+            [float(wrong_idx), float(place_idx), 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=np.float32,
+        )
+        info(f"  发送动作（错误 pick_block）: pick_idx={wrong_idx}（非任务 pick 色）, place_idx={place_idx}")
+        _test5_pause(interactive, "即将 env.step(错误 pick_block 的 pick_and_place)")
         t0 = time.time()
         obs3, r_wrong, done2, trunc2, info3 = env.step(action_wrong)
-        info(f"  info['target_xy']={info3.get('target_xy')}")
-        ok(f"  错误颜色 pick: reward={r_wrong:.4f}  "
+        info(f"  info['pick_xy']={info3.get('pick_xy')}")
+        ok(f"  错误 pick_block: reward={r_wrong:.4f}  "
            f"success={info3.get('success')}  ({time.time()-t0:.1f}s)")
         if not info3.get("success"):
-            _dump_recent_events("  错误 pick 失败，最近阶段记录：")
+            _dump_recent_events("  错误 pick_block 失败，最近阶段记录：")
 
         if r_wrong <= r_correct:
             ok(f"  奖励结构正确：错误颜色 {r_wrong:.4f} ≤ 正确颜色 {r_correct:.4f}")
@@ -568,13 +569,12 @@ def test_5_env_reset_step(interactive: bool = True):
         env._move_to_xy = _orig_move
         env._open_gripper = _orig_open
         env._close_gripper = _orig_close
-        env._execute_pick = _orig_pick
-        env._execute_place = _orig_place
+        env._execute_pick_and_place = _orig_pp
 
         _test5_pause(
             interactive,
             "即将进入 D：按「开爪→方块上方→预降→抓取高→夹持→抬起→"
-            "桶上方→下放→开爪→抬离」分步执行（与 _execute_pick/_execute_place 一致）。",
+            "桶上方→下放→开爪→抬离」分步执行（与 _execute_pick_and_place 内部一致）。",
         )
         if not _test5_run_ideal_phases(env, ppe_mod, interactive):
             warn("D 段未全部成功（某步规划/执行失败）")
@@ -583,13 +583,12 @@ def test_5_env_reset_step(interactive: bool = True):
         env._move_to_xy = _move_diag
         env._open_gripper = _open_diag
         env._close_gripper = _close_diag
-        env._execute_pick = _pick_diag
-        env._execute_place = _place_diag
+        env._execute_pick_and_place = _pp_diag
 
         _test5_pause(interactive, "D 段结束：将 env.reset 后进入 C 段（闭环冒烟）")
         env.reset()
 
-        _test5_pause(interactive, "即将进入 C：每回合仍会 env.reset，整段 pick/place 直到 done/trunc。")
+        _test5_pause(interactive, "即将进入 C：每回合 env.reset，单步 pick_and_place 直到 done/trunc。")
 
         # ── C. 闭环冒烟：单回合执行到 done/trunc，再进入下一回合 ─────────────
         info("\n闭环冒烟测试（每回合执行到 done/trunc，最多 3 回合）")
@@ -607,41 +606,43 @@ def test_5_env_reset_step(interactive: bool = True):
             place_idx = env._active_bin_colors.index(
                 info_dict.get("place_color"))
             na = env.n_active
-            nb_ep = env.n_blocks_ep
-            # 动作第 3 维 pose_id：与旧策略维度兼容；当前 env 下末端朝向由 horizontal+atan2 决定，不随 pose_id 变化
+            # 动作第 3 维 pose_id：保留兼容维；当前 env 下末端朝向由 horizontal+atan2 决定，不随 pose_id 变化
             pose_id_compat = 0.0
             ep_done = False
             ep_trunc = False
             ep_steps = 0
             while not (ep_done or ep_trunc):
                 ep_steps += 1
-                holding = getattr(env, "_holding_color", None)
-                if holding is None:
-                    # 未持物：持续尝试 pick（失败则多步重试同一策略；朝向不由 pose_id 控制）
-                    action = np.array(
-                        [0.0, float(pick_idx), pose_id_compat, 0.0, 0.0],
-                        dtype=np.float32,
-                    )
-                    phase = "pick"
-                else:
-                    # 已持物：执行 place
-                    action = np.array(
-                        [1.0, float(nb_ep + place_idx), pose_id_compat, 0.0, 0.0],
-                        dtype=np.float32,
-                    )
-                    phase = "place"
+                # 合并原语：单步完成 pick+place
+                action = np.array(
+                    [
+                        float(pick_idx),
+                        float(place_idx),
+                        pose_id_compat,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
+                    dtype=np.float32,
+                )
+                phase = "pick_and_place"
 
                 pc = info_dict.get("pick_color")
-                if phase == "pick" and pc:
+                if pc:
                     gp = env._get_pose(f"{pc}_block")
-                    info(f"  本步 pick 前 GT {pc}_block: ({gp[0]:.4f},{gp[1]:.4f},{gp[2]:.4f})")
+                    info(f"  本步前 GT {pc}_block: ({gp[0]:.4f},{gp[1]:.4f},{gp[2]:.4f})")
                 _test5_pause(
                     interactive,
                     f"回合{k+1} step{ep_steps} 将执行: {phase}（Enter 发送 env.step）",
                 )
                 t_step = time.time()
                 _, r_ep, ep_done, ep_trunc, info_ep = env.step(action)
-                info(f"    → target_xy={info_ep.get('target_xy')}  success={info_ep.get('success')}")
+                info(
+                    f"    → pick_xy={info_ep.get('pick_xy')}  "
+                    f"place_xy={info_ep.get('place_xy')}  "
+                    f"success={info_ep.get('success')}"
+                )
                 info(f"  回合{k+1} step{ep_steps:02d} {phase:16s}  "
                      f"success={info_ep.get('success')}  "
                      f"done={ep_done} trunc={ep_trunc}  "
@@ -672,8 +673,8 @@ def test_5_env_reset_step(interactive: bool = True):
                 if "_orig_move" in locals(): env._move_to_xy = _orig_move
                 if "_orig_open" in locals(): env._open_gripper = _orig_open
                 if "_orig_close" in locals(): env._close_gripper = _orig_close
-                if "_orig_pick" in locals(): env._execute_pick = _orig_pick
-                if "_orig_place" in locals(): env._execute_place = _orig_place
+                if "_orig_pp" in locals():
+                    env._execute_pick_and_place = _orig_pp
                 env.close()
         except Exception:
             pass
@@ -813,19 +814,15 @@ def test_7_llm_api():
         }
 
         t0 = time.time()
-        prim, obj_idx = policy.call_high_level(obs_dict)
+        pbi, pli = policy.call_high_level(obs_dict)
         ok(f"LLM API 调用成功 ({time.time()-t0:.1f}s)  "
-            f"primitive={prim}  obj_idx={obj_idx}")
+            f"pick_block_index={pbi}  place_bin_index={pli}")
 
-        if obj_idx < len(bc):
-            ok(f"  → {bc[obj_idx]}_block")
-        else:
-            ok(f"  → {bn[obj_idx - len(bc)]}_bin")
-
-        if prim == 0:
-            ok("返回值合理（夹爪 open → 应 pick）")
-        else:
-            warn(f"预期 pick，返回了 {prim}，检查 prompt")
+        if 0 <= pbi < len(bc):
+            ok(f"  pick → {bc[pbi]}_block")
+        if 0 <= pli < len(bn):
+            ok(f"  place → {bn[pli]}_bin")
+        ok("返回值应同时包含 pick_block_index 与 place_bin_index（单原语 pick_and_place）")
         return True
     except Exception as e:
         fail(f"LLM API 失败: {e}")

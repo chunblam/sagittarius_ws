@@ -8,7 +8,7 @@ llm_policy.py
 关键变化：
   - prompt里描述的物体从3种颜色扩展到N种颜色
   - prompt里现在包含桶的位置（因为桶是随机的，LLM需要知道桶在哪）
-  - object_index映射更新：前N个是方块，后N个是桶
+  - 高层输出 pick_block_index / place_bin_index（与 env 动作前两维一致），不再使用单一 object_index
 
 凭证、网关与模型名（勿写入仓库，用环境变量或 .env）：
   - api_key / base_url：调用方优先；为空则读 LLM_API_KEY、LLM_BASE_URL
@@ -177,19 +177,17 @@ MODEL_PRESETS = {
 HIGH_LEVEL_SYSTEM = textwrap.dedent("""
     You are a robot arm planner for a pick-and-place task.
 
-    The robot has a parallel gripper. It can execute two primitives:
-      primitive 0 = PICK  (grasp a block from the table)
-      primitive 1 = PLACE (release into a bin)
+    The robot executes ONE atomic primitive per decision: PICK_AND_PLACE.
+    In a single motion it grasps one block and releases it into one bin.
 
     Rules:
-    1. If gripper is open and holding nothing → choose PICK.
-       Pick the block that matches the task's pick_color.
-    2. If gripper is closed → choose PLACE.
-       Place into the bin that matches the task's place_color.
-    3. Always choose the object index that matches the target color.
+    1. Choose the block index that matches the task's pick_color (among blocks listed).
+    2. Choose the bin index that matches the task's place_color (among bins listed).
+    3. Indices are separate: pick_block_index is only among blocks (0..n_blocks-1),
+       place_bin_index is only among bins (0..n_bins-1).
 
     Respond ONLY with a JSON object:
-    {"primitive": <0 or 1>, "object_name": <str>, "object_index": <int>, "reason": <str>}
+    {"pick_block_index": <int>, "place_bin_index": <int>, "reason": <str>}
     No other text.
 """).strip()
 
@@ -200,7 +198,6 @@ def _build_scene_description(obs_dict: Dict[str, Any],
     active = obs_dict.get("active_colors")
     if not active:
         active = list(color_cfg.colors)
-    N = len(active)
 
     lines = []
     lines.append(f"Task: Pick the {obs_dict['pick_color']} block, "
@@ -209,22 +206,35 @@ def _build_scene_description(obs_dict: Dict[str, Any],
     held = obs_dict.get("held_object")
     lines.append(f"Holding: {held if held else 'nothing'}")
     lines.append("")
-    lines.append(f"There are N={N} active colors this episode. "
-                 f"object_index must be in [0, {2*N-1}] "
-                 f"(0..{N-1}=blocks, {N}..{2*N-1}=bins).")
+    bc = list(obs_dict.get("active_block_colors") or [])
+    bn = list(obs_dict.get("active_bin_colors") or [])
+    if not bc:
+        bc = [c for c in active if f"{c}_block" in obs_dict.get("positions", {})]
+    if not bn:
+        bn = [c for c in active if f"{c}_bin" in obs_dict.get("positions", {})]
+    if not bc:
+        bc = active
+    if not bn:
+        bn = active
+
+    lines.append(
+        f"Block indices for pick_block_index: 0..{len(bc)-1} "
+        f"(active_block_colors order). "
+        f"Bin indices for place_bin_index: 0..{len(bn)-1} "
+        f"(active_bin_colors order)."
+    )
     lines.append("Object positions (x,y in meters):")
     lines.append("  Blocks:")
-
-    for i, color in enumerate(active):
+    for i, color in enumerate(bc):
         key = f"{color}_block"
         pos = obs_dict["positions"].get(key, [0, 0])
         lines.append(f"    [{i}] {color}_block: x={pos[0]:.3f}, y={pos[1]:.3f}")
 
     lines.append("  Bins:")
-    for i, color in enumerate(active):
+    for i, color in enumerate(bn):
         key = f"{color}_bin"
         pos = obs_dict["positions"].get(key, [0, 0])
-        lines.append(f"    [{N+i}] {color}_bin: x={pos[0]:.3f}, y={pos[1]:.3f}")
+        lines.append(f"    [{i}] {color}_bin: x={pos[0]:.3f}, y={pos[1]:.3f}")
 
     return "\n".join(lines)
 
@@ -301,11 +311,9 @@ class LLMExplorationPolicy:
 
     def call_high_level(self, obs_dict: Dict) -> Tuple[int, int]:
         """
-        πH: 返回 (primitive, object_index)
-        object_index: 0..N-1=方块, N..2N-1=桶
+        πH: 返回 (pick_block_index, place_bin_index)，对应 env 动作前两维。
         """
         scene_str = _build_scene_description(obs_dict, self.color_cfg)
-        N = len(obs_dict.get("active_colors") or []) or self.n_active
 
         messages = [
             {"role": "system",  "content": HIGH_LEVEL_SYSTEM},
@@ -318,12 +326,12 @@ class LLMExplorationPolicy:
                 temperature=0.2, max_tokens=250)
             content = resp.choices[0].message.content.strip()
             content = re.sub(r"```[a-z]*\n?|```", "", content).strip()
-            data    = json.loads(content)
-            prim    = int(data["primitive"])
-            obj_idx = int(data["object_index"])
-            print(f"[LLM-H] prim={prim}, obj={data['object_name']}: "
+            data = json.loads(content)
+            pbi = int(data.get("pick_block_index", data.get("pick_block_idx", 0)))
+            pli = int(data.get("place_bin_index", data.get("place_bin_idx", 0)))
+            print(f"[LLM-H] pick_block_index={pbi}, place_bin_index={pli}: "
                   f"{data.get('reason','')}")
-            return prim, obj_idx
+            return pbi, pli
         except Exception as e:
             print(f"[LLM-H] 失败: {e}，使用fallback(0,0)")
             return 0, 0
@@ -414,8 +422,8 @@ class LLMExplorationPolicy:
 
     def get_exploration_action(self, obs_dict: Dict,
                                crops: np.ndarray) -> np.ndarray:
-        """完整LLM探索：πH → πL → ã_t"""
-        primitive, obj_idx = self.call_high_level(obs_dict)
+        """完整LLM探索：πH（pick+place 索引）→ πL（抓取侧残差）→ 7 维动作"""
+        pick_bi, place_bi = self.call_high_level(obs_dict)
 
         bc = list(obs_dict.get("active_block_colors") or [])
         bn = list(obs_dict.get("active_bin_colors") or [])
@@ -427,27 +435,38 @@ class LLMExplorationPolicy:
             bn = active
         nb = int(obs_dict.get("n_blocks") or len(bc))
         nbin = int(obs_dict.get("n_bins") or len(bn))
-        max_obj = max(0, nb + nbin - 1)
-        obj_idx = int(np.clip(obj_idx, 0, max_obj))
-        if obj_idx < nb:
-            obj_name = f"{bc[obj_idx]}_block"
-        else:
-            obj_name = f"{bn[obj_idx - nb]}_bin"
+        pick_bi = int(np.clip(pick_bi, 0, max(nb - 1, 0)))
+        place_bi = int(np.clip(place_bi, 0, max(nbin - 1, 0)))
 
+        obj_name = f"{bc[pick_bi]}_block"
         slot_n = int(self.n_active)
-        # 取对应的图像 crop（方块槽位与 obs 一致；对桶动作用目标方块 crop 近似）
-        crop_idx = min(obj_idx if obj_idx < slot_n else 0, len(crops) - 1)
+        crop_idx = min(pick_bi, slot_n - 1, len(crops) - 1)
         if 0 <= crop_idx < len(crops):
-            chw  = crops[crop_idx]
-            hwc  = (chw.transpose(1, 2, 0) * 255).astype(np.uint8)
+            chw = crops[crop_idx]
+            hwc = (chw.transpose(1, 2, 0) * 255).astype(np.uint8)
         else:
             hwc = np.zeros((28, 28, 3), dtype=np.uint8)
 
-        res_xy = self.call_low_level(obj_name, hwc)
+        res_pick = self.call_low_level(obj_name, hwc)
+        # 放置侧残差：用目标桶 crop 近似（若槽位对齐）
+        bin_name = f"{bn[place_bi]}_bin"
+        crop_b = min(place_bi, slot_n - 1, len(crops) - 1)
+        if 0 <= crop_b < len(crops):
+            chw_b = crops[crop_b]
+            hwc_b = (chw_b.transpose(1, 2, 0) * 255).astype(np.uint8)
+        else:
+            hwc_b = np.zeros((28, 28, 3), dtype=np.uint8)
+        res_place = self.call_low_level(bin_name, hwc_b)
 
-        return np.array([float(primitive), float(obj_idx), 0.0,
-                         float(res_xy[0]), float(res_xy[1])],
-                        dtype=np.float32)
+        return np.array([
+            float(pick_bi),
+            float(place_bi),
+            0.0,
+            float(res_pick[0]),
+            float(res_pick[1]),
+            float(res_place[0]),
+            float(res_place[1]),
+        ], dtype=np.float32)
 
     def clear_cache(self):
         self._code_cache.clear()

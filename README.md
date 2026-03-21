@@ -33,6 +33,8 @@ sagittarius_ws/
 ├── test_all.py                  ← 分步环境验证测试
 ├── calibration_guide.py         ← 标定值读取工具
 ├── pick_place_scene.world    ← Gazebo 场景（6 色 12 物体模型；训练按课程 2+2 / 3+2 激活子集）
+├── docs/
+│   └── SH_PLANNING.md        ← SH 策略 + 高层规划（后续方案，未实现）
 └── README.md
 ```
 
@@ -47,6 +49,9 @@ sagittarius_ws/
 | 颜色编码方式 | 3维one-hot（固定大小） | N维Embedding index（颜色数变化无需改网络） |
 | 方块/桶区分 | 分开处理 | 同一HSV检测，面积阈值自动区分 |
 | 观测向量 | crops + block_pos + gripper + lang | crops + block_pos + **bin_pos** + gripper + task |
+| 动作原语 | （历史）分步 pick / place | **单次 `pick_and_place`**：一步 `env.step` 内由 **`_execute_pick_and_place`** 连续执行（移动到方块→抓取→抬起→**同一函数内**过渡到桶上方→放置），**不是**先调 `_execute_pick` 再调 `_execute_place` 两次高层入口；向桶运动前会 **`set_start_state_to_current_state()`** 以持块姿态延续规划。**动作维度 7** = `[pick_block_idx, place_bin_idx, pose_id, rpx, rpy, rbx, rby]`；子阶段间隔 **`INTER_ROBOT_STAGE_PAUSE_S=0.5s`**。旧 checkpoint **不兼容**，需重新训练。 |
+
+**长任务（多步全配对）与 SH 策略如何组合**：见 **[`docs/SH_PLANNING.md`](docs/SH_PLANNING.md)**（规划层方案，当前未在代码中实现）。
 
 ---
 
@@ -68,7 +73,7 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
 
-**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形，见 `pick_place_env.py` 常量）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.04m**（`MIN_OBJECT_CENTER_GAP`），网格落位微抖动 **`OBJECT_PLACE_JITTER` 默认 ±8mm**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=horizontal`**（侧向水平对准目标）；基础四元数见 **`TCP_HORIZONTAL_BASE_QUAT`**，若 URDF 中 `ee_link` 定义不同需在 RViz/MoveIt 中微调；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
+**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形，见 `pick_place_env.py` 常量）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.08m**（`MIN_OBJECT_CENTER_GAP`，xy 平面两两中心距离）；摆放用多轮 max-spread 贪心（`OBJECT_PLACEMENT_SPREAD_TRIALS`）使分布更均匀。网格落位微抖动 **`OBJECT_PLACE_JITTER` 默认 ±8mm**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=horizontal`**（侧向水平对准目标）；基础四元数见 **`TCP_HORIZONTAL_BASE_QUAT`**，若 URDF 中 `ee_link` 定义不同需在 RViz/MoveIt 中微调；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
