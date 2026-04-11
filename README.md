@@ -73,7 +73,7 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 
 包含 6 种颜色的方块（`{color}_block`）和 6 种颜色的垃圾桶（`{color}_bin`）。工作台在 world 中为 **70×70 cm**（中心约 x=0.28）。
 
-**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`**（底座前方作业矩形，见 `pick_place_env.py` 常量）内，且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.08m**（`MIN_OBJECT_CENTER_GAP`，xy 平面两两中心距离）；摆放用多轮 max-spread 贪心（`OBJECT_PLACEMENT_SPREAD_TRIALS`）使分布更均匀。网格落位微抖动 **`OBJECT_PLACE_JITTER` 默认 ±8mm**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=horizontal`**（侧向水平对准目标）；基础四元数见 **`TCP_HORIZONTAL_BASE_QUAT`**，若 URDF 中 `ee_link` 定义不同需在 RViz/MoveIt 中微调；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
+**训练课程与观测维度**：`train.py` 使用 **`--curriculum {2+2,3+2}`**（默认 **`2+2`**：2 方块 + 2 桶；**`3+2`**：3 方块 + 2 桶，多 1 个无对应桶的干扰块）。策略网络侧 **`n_active=SLOT_COUNT=3` 固定**（`obs_dim` 不变）。物体摆放在 **`PLACE_RECT_*`** 内，且**方块仅在 `BLOCK_PLACE_RECT_X`（+x 较小侧）、桶仅在 `BIN_PLACE_RECT_X`（+x 较大侧）**，两区 x 间隔 ≥ `MIN_OBJECT_CENTER_GAP`；方块物理尺寸 **4cm**（与 `pick_place_scene.world` 一致），且**永不**进入 **`ROBOT_BASE_EXCLUSION_*`** 碰撞圆（与 **`ARM_BASE_*` 可达环**是两回事：后者仅用于 IK 可达判定）。**物体中心最小间距 0.08m**（`MIN_OBJECT_CENTER_GAP`，xy 平面两两中心距离）；摆放用多轮 max-spread 贪心（`OBJECT_PLACEMENT_SPREAD_TRIALS`）使分布更均匀。网格落位微抖动 **`OBJECT_PLACE_JITTER` 默认 ±8mm**；`step` 里动作用 `OBJECT_ZONE_*` 做宽松裁剪。抓取默认 **`GRASP_ORIENTATION_MODE=horizontal`**（侧向水平对准目标）；基础四元数见 **`TCP_HORIZONTAL_BASE_QUAT`**，若 URDF 中 `ee_link` 定义不同需在 RViz/MoveIt 中微调；可调 **`TCP_GRASP_XY_BACKOFF_M`**。若仍碰底座或偏一侧，在 `pick_place_env.py` 中微调 **`ROBOT_BASE_EXCLUSION_XY` / `ROBOT_BASE_EXCLUSION_RADIUS` / `PLACE_RECT_*`**。**与旧 checkpoint 不兼容时需重新训练**。
 
 ### 3. MoveIt 命名空间（SGR532 仿真默认）
 
@@ -82,13 +82,13 @@ pip install stable-baselines3[extra] gymnasium openai torch torchvision matplotl
 - 用绝对路径 **`/sgr532/robot_description`** 加载模型；
 - 用 **`ns=sgr532`** 连接 **`/sgr532/move_group`** action（仅 `ns` 或仅短路径在 Noetic 上常连不上）。
 
-可选：连接超时（秒，默认 30）：
+可选：连接超时（秒，默认 15）：
 
 ```bash
 EXPLORELLM_MOVEIT_WAIT=45
 ```
 
-单次规划时间与尝试次数在 `pick_place_env.py` 中由 **`MOVEIT_PLANNING_TIME_S`**（默认 **8s**）、**`MOVEIT_NUM_PLANNING_ATTEMPTS`**（默认 **40**）控制；初始化时优先 **`set_planner_id("RRTConnect")`**。也可用环境变量覆盖单次规划上限（不必改代码）：
+单次规划时间与尝试次数在 `pick_place_env.py` 中由 **`MOVEIT_PLANNING_TIME_S`**（默认 **4s**）、**`MOVEIT_NUM_PLANNING_ATTEMPTS`**（默认 **4**）控制；初始化时优先 **`set_planner_id("RRTConnect")`**。也可用环境变量覆盖单次规划上限（不必改代码）：
 
 ```bash
 EXPLORELLM_MOVEIT_PLANNING_TIME_S=10

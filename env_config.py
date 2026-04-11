@@ -46,7 +46,7 @@ MOVEIT_WAIT_ENV = "EXPLORELLM_MOVEIT_WAIT"
 MOVEIT_PLANNING_TIME_ENV = "EXPLORELLM_MOVEIT_PLANNING_TIME_S"
 GAZEBO_RESET_SIM_ON_HOME_FAIL_ENV = "EXPLORELLM_GAZEBO_RESET_SIMULATION_ON_HOME_FAIL"
 DEFAULT_MOVEIT_NS = "sgr532"
-DEFAULT_MOVEIT_WAIT_S = 30.0
+DEFAULT_MOVEIT_WAIT_S = 15.0
 
 
 def _strip_or_none(key: str) -> Optional[str]:
@@ -99,16 +99,16 @@ def moveit_commander_ns() -> str:
 def moveit_planning_time_s() -> float:
     """
     单次 MoveIt plan() 的 OMPL 时间上限（秒）。
-    默认 8.0；可通过 EXPLORELLM_MOVEIT_PLANNING_TIME_S 覆盖（例如 4 加快失败、12 提高难场景成功率）。
+    默认 4.0；可通过 EXPLORELLM_MOVEIT_PLANNING_TIME_S 覆盖（例如 2 加快失败、8 提高难场景成功率）。
     """
     raw = os.environ.get(MOVEIT_PLANNING_TIME_ENV, "").strip()
     if not raw:
-        return 30
+        return 4
     try:
         t = float(raw)
         return max(0.5, min(t, 120.0))
     except ValueError:
-        return 30
+        return 4
 
 
 def moveit_robot_description_param() -> str:

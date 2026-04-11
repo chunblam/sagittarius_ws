@@ -9,6 +9,8 @@ pick_place_env.py
   变化2：垃圾桶/方块在「底座前方」轴对齐矩形（PLACE_RECT_*）内随机，并禁止落入底座碰撞圆
   变化3：observation 向量用任务颜色 index（固定槽位数）
   变化4：observation 包含桶的位置（桶每回合随机）
+  摆放：方块仅在桌面 +x 较小侧（BLOCK_PLACE_RECT_X），桶仅在 +x 较大侧（BIN_PLACE_RECT_X）；
+        方块尺寸 4cm 立方体（与 world/MoveIt 一致）。
 
 训练课程 curriculum_mode：
   - "2+2"：2 个方块 + 2 个桶（颜色子集独立打乱），任务从方块集合与桶集合中各抽一个颜色。
@@ -91,15 +93,18 @@ ARM_REACH_MAX_R = 0.38
 ROBOT_BASE_EXCLUSION_XY = (0.10, 0.0)   # 底座投影中心（米）
 ROBOT_BASE_EXCLUSION_RADIUS = 0.15      # 底座+连杆最近占地半径（留 5cm 安全裕量）
 
-# 作业矩形：底座「前方」的理想抓取区域。
-# x: 0.18~0.40（离底座 8~30cm，机械臂前方中段，避免过近卡奇异点）
+# 作业矩形：底座「前方」的理想抓取区域（方块与桶分区摆放，见下）。
 # y: ±0.18（对称，与桌面黑框对齐）
-# 方块放左半段 (x 较小)，垃圾桶放右半段 (x 较大)，整体在一个矩形内统一管理
-PLACE_RECT_X = (0.18, 0.42)
+PLACE_RECT_X = (0.16, 0.47)
 PLACE_RECT_Y = (-0.18, 0.18)
 
+# 沿 +X 分区（与 RViz 红轴划分一致）：方块在 **x 较小侧**，桶在 **x 较大侧。
+# 两区边界间距 ≥ MIN_OBJECT_CENTER_GAP，保证任一方块中心与任一桶中心 ≥ gap。
+BLOCK_PLACE_RECT_X = (0.16, 0.26)   # 方块仅在此 x 范围内（左侧）
+BIN_PLACE_RECT_X = (0.34, 0.47)     # 桶仅在此 x 范围内（右侧）；0.34-0.26 = 0.08 = gap
+
 # 仅用于 step() 里对动作的矩形裁剪（略宽于 PLACE_RECT）
-OBJECT_ZONE_X = (0.15, 0.44)
+OBJECT_ZONE_X = (0.14, 0.49)
 OBJECT_ZONE_Y = (-0.20, 0.20)
 # 物体中心之间最小距离（米，xy 平面两两欧氏距离）；当前 8cm
 MIN_OBJECT_CENTER_GAP = 0.08
@@ -117,21 +122,20 @@ SPAWN_PARK_Y0 = 0.0
 # ──────────────────────────────────────────────────────────
 # 坐标系约定（与 world 文件一致）：
 #   桌面顶面 z = 0.00（world文件桌面顶面在z=0）
-#   方块为 5cm 立方体：world 中方块底面 z≈0.001，重心 z≈0.026；逻辑上用 TABLE_Z+BLOCK_H/2
+#   方块为 4cm 立方体：重心 z≈TABLE_Z+BLOCK_H/2；逻辑与 world/MoveIt 一致
 #   桶底面   z = 0.00，桶重心   z = BIN_H/2   = 0.06
 #
 # GRASP_H 修正：
-#   方块顶面在 z = TABLE_Z + BLOCK_H（5cm 立方体时 0.05m）
+#   方块顶面在 z = TABLE_Z + BLOCK_H
 #   末端目标约在方块中部附近：TABLE_Z + GRASP_H ≈ TABLE_Z + BLOCK_H/2 + 小裕量
-#   当前 GRASP_H=0.085 → TABLE_Z+0.085（在旧版 0.065 上再 +2cm，减轻侧向伸入时蹭方块）
 #
 # APPROACH_H 修正：
 #   接近/搬运高度必须明显高于最高物体（桶高 0.12m）加安全裕量
 #   TABLE_Z + APPROACH_H = 0.27m（高于桶顶约 15cm）；持块平移与桶口开爪同高，PlanningScene 不 attach 方块
 # ──────────────────────────────────────────────────────────
 TABLE_Z       = 0.00   # 桌面顶面（world文件里桌面顶面在 z=0）
-BLOCK_H       = 0.05   # 方块高度（与 world 中 5cm 立方体一致）
-BLOCK_W       = 0.05   # 方块边长（x/y，立方体）
+BLOCK_H       = 0.04   # 方块高度（与 world 中 4cm 立方体一致）
+BLOCK_W       = 0.04   # 方块边长（x/y，立方体）
 BIN_H         = 0.12   # 垃圾桶高度（外高）
 BIN_INNER_W   = 0.065  # 垃圾桶内腔宽度（x/y）
 BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
@@ -139,7 +143,7 @@ BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 APPROACH_H    = 0.27   # 接近/抬起/桶上方开爪高度（末端 z = TABLE_Z + APPROACH_H）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面/蹭方块；当前 GRASP_H 已较早期值抬高（含 +2cm 裕量）。
-GRASP_H       = 0.085  # 最终抓取末端 z = TABLE_Z + GRASP_H（世界系，原 0.065 上 +2cm）
+GRASP_H       = 0.072  # 最终抓取末端 z = TABLE_Z + GRASP_H（4cm 块中心约 0.02，略抬高以利侧抓）
 # 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
 PRE_GRASP_CLEAR_Z = 0.04  # 在方块顶面上方预留的间隙（米），再落爪（原 0.02 上 +2cm → pre_z≈0.09）
 
@@ -200,9 +204,10 @@ MOVEIT_GRIPPER_GRASP_STATE = "middle"
 # MoveIt OMPL：单次 plan 允许的最长时间（秒）与每次 plan() 内尝试的不同随机种子数。
 # 场景简单（2个方块+2个桶+桌面）时，5s 已经足够；过大的 planning_time 反而
 # 让超时报错出现得更晚，调试困难。
-# 关键：MOVEIT_NUM_PLANNING_ATTEMPTS 从 40 降到 8，避免 OMPL 反复探索造成伪延迟。
-MOVEIT_PLANNING_TIME_S = 30
-MOVEIT_NUM_PLANNING_ATTEMPTS = 16
+# 关键：先用小步参数（time=4s, attempts=4）快速验证 IK/场景可达性。
+# 说明：实际 planning_time 默认值由 env_config.moveit_planning_time_s() 提供。
+MOVEIT_PLANNING_TIME_S = 4
+MOVEIT_NUM_PLANNING_ATTEMPTS = 4
 # 默认目标容差略放宽，利于首次规划命中；精定位仍可在 _move_to_xy 的 relaxed 二次尝试中收紧/放宽
 MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.016
 MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD = 0.15
@@ -496,7 +501,8 @@ class SagittariusPickPlaceEnv(gym.Env):
                 p.pose.position.y = float(bxyz[1])
                 p.pose.position.z = float(bxyz[2])
                 p.pose.orientation.w = 1.0
-                self._planning_scene.add_box(block_name(c), p, (0.05, 0.05, 0.05))
+                self._planning_scene.add_box(
+                    block_name(c), p, (BLOCK_W, BLOCK_W, BLOCK_H))
 
         for c in self._active_bin_colors:
             zyz = self._get_pose(bin_name(c))
@@ -699,25 +705,38 @@ class SagittariusPickPlaceEnv(gym.Env):
         r = float(np.hypot(x - bx, y - by))
         return r >= float(ROBOT_BASE_EXCLUSION_RADIUS) - 1e-9
 
-    def _is_valid_placement_xy(self, x: float, y: float) -> bool:
-        """可达环内 + 不在底座碰撞圆内 + 在作业矩形内（双保险）。"""
+    def _is_valid_block_xy(self, x: float, y: float) -> bool:
+        """方块：可达 + 避底座 + 仅在方块分区。"""
         if not self._is_reachable_xy(x, y):
             return False
         if not self._is_clear_of_robot_base(x, y):
             return False
-        if not (PLACE_RECT_X[0] <= x <= PLACE_RECT_X[1]
-                and PLACE_RECT_Y[0] <= y <= PLACE_RECT_Y[1]):
-            return False
-        return True
+        return (BLOCK_PLACE_RECT_X[0] <= x <= BLOCK_PLACE_RECT_X[1]
+                and PLACE_RECT_Y[0] <= y <= PLACE_RECT_Y[1])
 
-    def _build_rect_placement_candidates(self) -> List[Tuple[float, float]]:
-        """在 PLACE_RECT 内细网格上生成候选点，仅保留 _is_valid_placement_xy。"""
+    def _is_valid_bin_xy(self, x: float, y: float) -> bool:
+        """桶：可达 + 避底座 + 仅在桶分区。"""
+        if not self._is_reachable_xy(x, y):
+            return False
+        if not self._is_clear_of_robot_base(x, y):
+            return False
+        return (BIN_PLACE_RECT_X[0] <= x <= BIN_PLACE_RECT_X[1]
+                and PLACE_RECT_Y[0] <= y <= PLACE_RECT_Y[1])
+
+    def _is_valid_placement_xy(self, x: float, y: float) -> bool:
+        """在方块区或桶区内（用于回退网格等仍覆盖整块作业带）。"""
+        return self._is_valid_block_xy(x, y) or self._is_valid_bin_xy(x, y)
+
+    def _build_zone_candidates(
+        self, rect_x: Tuple[float, float], rect_y: Tuple[float, float],
+        valid_fn,
+    ) -> List[Tuple[float, float]]:
+        """在指定矩形细网格上生成候选点，仅保留 valid_fn(cx,cy)。"""
         pts: List[Tuple[float, float]] = []
-        # 略密于 gap 的候选格，便于 max-spread 多轮贪心选到更均匀分布
         cell = max(0.02, min(MIN_OBJECT_CENTER_GAP * 0.38,
-                   (PLACE_RECT_X[1] - PLACE_RECT_X[0]) / 10.0,
-                   (PLACE_RECT_Y[1] - PLACE_RECT_Y[0]) / 8.0))
-        rx, ry = PLACE_RECT_X, PLACE_RECT_Y
+                   (rect_x[1] - rect_x[0]) / 8.0,
+                   (rect_y[1] - rect_y[0]) / 8.0))
+        rx, ry = rect_x, rect_y
         cols = max(1, int((rx[1] - rx[0]) / cell))
         rows = max(1, int((ry[1] - ry[0]) / cell))
         for row in range(rows):
@@ -725,31 +744,35 @@ class SagittariusPickPlaceEnv(gym.Env):
                 cx = rx[0] + cell * (col + 0.5)
                 cy = ry[0] + cell * (row + 0.5)
                 if cx <= rx[1] and cy <= ry[1]:
-                    if self._is_valid_placement_xy(float(cx), float(cy)):
+                    if valid_fn(float(cx), float(cy)):
                         pts.append((float(cx), float(cy)))
         return pts
 
-    def _sample_rect_xy(self, rng: np.random.Generator) -> Tuple[float, float]:
-        """在 PLACE_RECT 内均匀随机，直到满足有效放置约束。"""
+    def _sample_zone_xy(
+        self, rng: np.random.Generator,
+        rect_x: Tuple[float, float], rect_y: Tuple[float, float],
+        valid_fn,
+    ) -> Tuple[float, float]:
+        """在指定矩形内均匀随机，直到满足 valid_fn。"""
         for _ in range(120):
-            x = float(rng.uniform(*PLACE_RECT_X))
-            y = float(rng.uniform(*PLACE_RECT_Y))
-            if self._is_valid_placement_xy(x, y):
+            x = float(rng.uniform(rect_x[0], rect_x[1]))
+            y = float(rng.uniform(rect_y[0], rect_y[1]))
+            if valid_fn(x, y):
                 return x, y
-        # 退化：矩形几何中心附近（仍做校验）
-        cx = 0.5 * (PLACE_RECT_X[0] + PLACE_RECT_X[1])
-        cy = 0.5 * (PLACE_RECT_Y[0] + PLACE_RECT_Y[1])
-        if self._is_valid_placement_xy(cx, cy):
+        cx = 0.5 * (rect_x[0] + rect_x[1])
+        cy = 0.5 * (rect_y[0] + rect_y[1])
+        if valid_fn(cx, cy):
             return cx, cy
         return cx, cy
 
-    def _greedy_grid_centers(self, n_needed: int, gap: float,
-                             rng: np.random.Generator) -> List[Tuple[float, float]]:
-        """在 PLACE_RECT 栅格上贪心选取 n 个点，两两中心距 ≥ gap。"""
-        candidates = self._build_rect_placement_candidates()
-        if len(candidates) < max(8, n_needed * 3):
+    def _greedy_grid_centers(
+        self, n_needed: int, gap: float, rng: np.random.Generator,
+        candidates: List[Tuple[float, float]],
+    ) -> List[Tuple[float, float]]:
+        """在候选点栅格上贪心选取 n 个点，两两中心距 ≥ gap。"""
+        if len(candidates) < max(4, n_needed * 2):
             rospy.logwarn(
-                "[Env] 作业矩形内有效候选点偏少，请放宽 PLACE_RECT_* 或 "
+                "[Env] 分区内有效候选点偏少，请放宽 BLOCK/BIN_PLACE_RECT_* 或 "
                 "ROBOT_BASE_EXCLUSION_* / 可达环")
         rng.shuffle(candidates)
         selected: List[Tuple[float, float]] = []
@@ -766,10 +789,9 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _select_centers_max_spread(
         self, n_needed: int, gap: float, rng: np.random.Generator,
+        candidates: List[Tuple[float, float]],
     ) -> List[Tuple[float, float]]:
-        """多轮随机贪心：每轮 shuffle 候选顺序，在满足两两 ≥ gap 的前提下取 n 个点，
-        保留「所有点对欧氏距离之和」最大的一组，减轻单侧成簇、对侧孤立的现象。"""
-        candidates = self._build_rect_placement_candidates()
+        """多轮随机贪心：在满足两两 ≥ gap 的前提下取 n 个点，使点对距离之和最大。"""
         if len(candidates) < n_needed:
             return []
         best: List[Tuple[float, float]] = []
@@ -802,76 +824,91 @@ class SagittariusPickPlaceEnv(gym.Env):
         return best
 
     def _place_active_objects_unified(self, rng: np.random.Generator) -> None:
-        """在 PLACE_RECT 作业矩形内摆放；优先 max-spread 均匀选点 + 微抖动；永不进入底座碰撞圆。"""
-        targets: List[Tuple[str, float]] = []
-        for c in self._active_block_colors:
-            targets.append((block_name(c), BLOCK_H / 2.0))
-        for c in self._active_bin_colors:
-            targets.append((bin_name(c), BIN_H / 2.0))
+        """方块仅在 BLOCK_PLACE_RECT_X，桶仅在 BIN_PLACE_RECT_X；分区 max-spread + 微抖动。
 
-        n = len(targets)
+        两区 x 方向间隔 ≥ MIN_OBJECT_CENTER_GAP，故方块与桶中心距自动满足 gap。
+        """
         gap = float(MIN_OBJECT_CENTER_GAP)
+        n_blocks = len(self._active_block_colors)
+        n_bins = len(self._active_bin_colors)
 
-        def _try_assign(centers: List[Tuple[float, float]]) -> bool:
-            if len(centers) < n:
-                return False
-            centers = centers[:n]
-            perm = list(range(n))
-            rng.shuffle(perm)
-            jitter = float(OBJECT_PLACE_JITTER)
-            for k in range(n):
-                t_idx = perm[k]
-                nm, zc = targets[t_idx]
-                cx, cy = centers[k]
-                x, y = float(cx), float(cy)
-                if jitter > 0:
-                    for _ in range(24):
-                        tx = cx + float(rng.uniform(-jitter, jitter))
-                        ty = cy + float(rng.uniform(-jitter, jitter))
-                        if self._is_valid_placement_xy(tx, ty):
-                            x, y = tx, ty
-                            break
-                if not self._is_valid_placement_xy(x, y):
-                    x, y = cx, cy
-                self._teleport(nm, x, y, zc)
-            return True
+        block_cand = self._build_zone_candidates(
+            BLOCK_PLACE_RECT_X, PLACE_RECT_Y, self._is_valid_block_xy)
+        bin_cand = self._build_zone_candidates(
+            BIN_PLACE_RECT_X, PLACE_RECT_Y, self._is_valid_bin_xy)
 
-        centers = self._select_centers_max_spread(n, gap, rng)
-        if len(centers) < n:
-            centers = self._greedy_grid_centers(n, gap, rng)
-        if _try_assign(centers):
-            return
+        block_centers = self._select_centers_max_spread(
+            n_blocks, gap, rng, block_cand)
+        if len(block_centers) < n_blocks:
+            block_centers = self._greedy_grid_centers(
+                n_blocks, gap, rng, block_cand)
 
-        rospy.logwarn(
-            "[Env] 矩形网格摆放失败，回退到矩形内随机采样")
+        bin_centers = self._select_centers_max_spread(
+            n_bins, gap, rng, bin_cand)
+        if len(bin_centers) < n_bins:
+            bin_centers = self._greedy_grid_centers(
+                n_bins, gap, rng, bin_cand)
 
         placed_xy: List[Tuple[float, float]] = []
-        for idx, (nm, zc) in enumerate(targets):
-            ok = False
-            for _ in range(400):
-                x, y = self._sample_rect_xy(rng)
+        jitter_amt = float(OBJECT_PLACE_JITTER)
+
+        def _jitter(
+            cx: float, cy: float, valid_fn,
+        ) -> Tuple[float, float]:
+            x, y = float(cx), float(cy)
+            if jitter_amt > 0:
+                for _ in range(24):
+                    tx = cx + float(rng.uniform(-jitter_amt, jitter_amt))
+                    ty = cy + float(rng.uniform(-jitter_amt, jitter_amt))
+                    if valid_fn(tx, ty):
+                        x, y = tx, ty
+                        break
+            if not valid_fn(x, y):
+                x, y = cx, cy
+            return x, y
+
+        # ── 方块 ──
+        for i, c in enumerate(self._active_block_colors):
+            if i < len(block_centers):
+                cx, cy = block_centers[i]
+            else:
+                cx, cy = self._sample_zone_xy(
+                    rng, BLOCK_PLACE_RECT_X, PLACE_RECT_Y, self._is_valid_block_xy)
+            x, y = _jitter(cx, cy, self._is_valid_block_xy)
+            self._teleport(block_name(c), x, y, BLOCK_H / 2.0)
+            placed_xy.append((x, y))
+
+        # ── 桶（与已摆方块保持 gap）──
+        for i, c in enumerate(self._active_bin_colors):
+            ok_xy = None
+            if i < len(bin_centers):
+                cx, cy = bin_centers[i]
+                x, y = _jitter(cx, cy, self._is_valid_bin_xy)
                 if all(
-                    np.hypot(x - px, y - py) >= gap
+                    np.hypot(x - px, y - py) >= gap - 1e-9
                     for px, py in placed_xy
                 ):
-                    placed_xy.append((x, y))
-                    self._teleport(nm, x, y, zc)
-                    ok = True
-                    break
-            if ok:
-                continue
-            grid = self._deterministic_grid(
-                n, PLACE_RECT_X, PLACE_RECT_Y, gap, placement_valid=True)
-            if idx < len(grid):
-                x, y = grid[idx]
-                placed_xy.append((x, y))
-                self._teleport(nm, x, y, zc)
-                rospy.logwarn(
-                    f"[Env] {nm} 随机摆放失败，使用 fallback 网格 ({x:.3f},{y:.3f})")
-            else:
-                rospy.logerr(
-                    "[Env] 物体无法摆放：请放宽 PLACE_RECT_* 或 "
-                    "MIN_OBJECT_CENTER_GAP / 物体数量")
+                    ok_xy = (x, y)
+            if ok_xy is None:
+                for _ in range(500):
+                    cx, cy = self._sample_zone_xy(
+                        rng, BIN_PLACE_RECT_X, PLACE_RECT_Y, self._is_valid_bin_xy)
+                    x, y = _jitter(cx, cy, self._is_valid_bin_xy)
+                    if all(
+                        np.hypot(x - px, y - py) >= gap - 1e-9
+                        for px, py in placed_xy
+                    ):
+                        ok_xy = (x, y)
+                        break
+                if ok_xy is None:
+                    rospy.logerr(
+                        "[Env] 桶无法在分区内与已有物体保持间距，请放宽 BIN_PLACE_RECT_* 或 gap")
+                    cx, cy = self._sample_zone_xy(
+                        rng, BIN_PLACE_RECT_X, PLACE_RECT_Y, self._is_valid_bin_xy)
+                    ok_xy = _jitter(cx, cy, self._is_valid_bin_xy)
+            x, y = ok_xy
+            self._teleport(bin_name(c), x, y, BIN_H / 2.0)
+            placed_xy.append((x, y))
 
     def _randomize_scene(self):
         """
@@ -1195,7 +1232,8 @@ class SagittariusPickPlaceEnv(gym.Env):
             p.pose.position.y = 0.0
             p.pose.position.z = 0.0
             p.pose.orientation.w = 1.0
-            self._planning_scene.attach_box(ee, block_name(color), p, (0.05, 0.05, 0.05))
+            self._planning_scene.attach_box(
+                ee, block_name(color), p, (BLOCK_W, BLOCK_W, BLOCK_H))
             # attach 后 ignore 参数语义改变，下次 move 需重建场景
             self._scene_dirty = True
         except Exception as e:
