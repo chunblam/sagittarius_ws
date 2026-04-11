@@ -143,18 +143,18 @@ BIN_WALL_T    = 0.0025 # 壁厚/底厚（与world一致）
 APPROACH_H    = 0.27   # 接近/抬起/桶上方开爪高度（末端 z = TABLE_Z + APPROACH_H）
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面/蹭方块；当前 GRASP_H 已较早期值抬高（含 +2cm 裕量）。
-GRASP_H       = 0.072  # 最终抓取末端 z = TABLE_Z + GRASP_H（4cm 块中心约 0.02，略抬高以利侧抓）
+GRASP_H       = 0.076  # 最终抓取末端 z = TABLE_Z + GRASP_H（小幅上调 4mm，降低碰桌风险）
 # 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
-PRE_GRASP_CLEAR_Z = 0.04  # 在方块顶面上方预留的间隙（米），再落爪（原 0.02 上 +2cm → pre_z≈0.09）
+PRE_GRASP_CLEAR_Z = 0.05  # 在方块顶面上方预留的间隙（米），先更高预降再抓取更稳
 
 PLACE_H       = 0.11   # 历史：下放至桶口内再开爪；当前流程改为桶上方同 APPROACH_H 开爪，保留常量供文档/对比
 
 # 抓取后「是否已离地可搬运」的验证：方块中心 z 须高于此值（米）。
 # 旧版用 TABLE_Z+BIN_H+0.02≈0.14，等价于要求 COM 高于桶口；水平侧抓时 COM 常在 0.10~0.12 即已离地，
 # 会误判失败并在验证前开爪。此处仅验证「已抬起」而非「高于桶口」（入桶由 place 后 _check_done 判定）。
-PICK_LIFT_VERIFY_Z = TABLE_Z + 0.10
-# 抬起后若方块 COM 仍低于 14cm（world z），再尝试一次「绕末端局部 X 的小 pitch」抬腕辅助。
-PICK_LIFT_ASSIST_Z = TABLE_Z + 0.14
+PICK_LIFT_VERIFY_Z = TABLE_Z + 0.09
+# 抬起后若方块 COM 仍低于该阈值（world z），再尝试一次「绕末端局部 X 的小 pitch」抬腕辅助。
+PICK_LIFT_ASSIST_Z = TABLE_Z + 0.12
 # 抬腕辅助：绕末端局部 X 轴（弧度），约 7°；若方块 z 反降可调小或改符号。
 PICK_LIFT_ASSIST_PITCH_RAD = 0.12
 
@@ -195,6 +195,9 @@ PLACE_DROP_SETTLE_S = 1.0
 
 # 策略网络动作向量维度（与 action_space 一致）
 ACTION_DIM = 7
+# 残差裁剪：抓取阶段收紧到 ±2cm 提升命中率；放置保持 ±5cm 兼顾策略探索。
+PICK_RESIDUAL_CLIP_M = 0.02
+PLACE_RESIDUAL_CLIP_M = 0.05
 
 # MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
 MOVEIT_ARM_HOME_STATE = "home"
@@ -1195,8 +1198,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         orig_pos_tol  = self._moveit_arm.get_goal_position_tolerance()
         orig_ort_tol  = self._moveit_arm.get_goal_orientation_tolerance()
         # 二次尝试：进一步放宽，减少 TIMED_OUT（仍保持水平侧向姿态类型不变）
-        self._moveit_arm.set_goal_position_tolerance(0.030)
-        self._moveit_arm.set_goal_orientation_tolerance(0.26)
+        self._moveit_arm.set_goal_position_tolerance(0.020)
+        self._moveit_arm.set_goal_orientation_tolerance(0.22)
         result = _try_plan_execute(x, y, z, qx, qy, qz, qw, "relaxed_tol")
         self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
         self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
@@ -1653,8 +1656,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         pick_idx = int(np.round(np.clip(act[0], 0, max(nb - 1, 0))))
         place_idx = int(np.round(np.clip(act[1], 0, max(ns - 1, 0))))
         pose_id = int(np.round(np.clip(act[2], 0, self.pose_id_count - 1)))
-        res_pick = np.clip(act[3:5], -0.05, 0.05)
-        res_place = np.clip(act[5:7], -0.05, 0.05)
+        res_pick = np.clip(act[3:5], -PICK_RESIDUAL_CLIP_M, PICK_RESIDUAL_CLIP_M)
+        res_place = np.clip(act[5:7], -PLACE_RESIDUAL_CLIP_M, PLACE_RESIDUAL_CLIP_M)
 
         pick_block_color = self._active_block_colors[pick_idx]
         place_bin_color = self._active_bin_colors[place_idx]
