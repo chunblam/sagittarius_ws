@@ -212,7 +212,7 @@ MOVEIT_GRIPPER_GRASP_STATE = "middle"
 MOVEIT_PLANNING_TIME_S = 4
 MOVEIT_NUM_PLANNING_ATTEMPTS = 4
 # 默认目标容差略放宽，利于首次规划命中；精定位仍可在 _move_to_xy 的 relaxed 二次尝试中收紧/放宽
-MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.010
+MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.018
 MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD = 0.15
 
 # Gazebo模型名称约定：{color}_block, {color}_bin
@@ -1197,8 +1197,8 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 只放宽方向容差，不换姿态类型，保持末端动作一致性
         orig_pos_tol  = self._moveit_arm.get_goal_position_tolerance()
         orig_ort_tol  = self._moveit_arm.get_goal_orientation_tolerance()
-        # 二次尝试：位置保持 1cm 精度，仅适度放宽姿态，减少首轮无解。
-        self._moveit_arm.set_goal_position_tolerance(0.010)
+        # 二次尝试：位置容差放宽到 1.8cm，仅适度放宽姿态，减少首轮无解。
+        self._moveit_arm.set_goal_position_tolerance(0.018)
         self._moveit_arm.set_goal_orientation_tolerance(0.20)
         result = _try_plan_execute(x, y, z, qx, qy, qz, qw, "relaxed_tol")
         self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
