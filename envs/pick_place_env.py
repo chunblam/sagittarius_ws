@@ -144,8 +144,8 @@ APPROACH_H    = 0.27   # 接近/抬起/桶上方开爪高度（末端 z = TABLE_
 # 抓取高度：世界系 z（ee_link 原点）。方块重心约在 TABLE_Z+BLOCK_H/2；末端 TCP 与几何中心有偏差时，
 # 过低的单一目标易刮桌面/蹭方块；当前 GRASP_H 已较早期值抬高（含 +2cm 裕量）。
 GRASP_H       = 0.076  # 最终抓取末端 z = TABLE_Z + GRASP_H（小幅上调 4mm，降低碰桌风险）
-# 方块顶面约 TABLE_Z+BLOCK_H，先降到顶面上方再最终下降，避免大跨度直线“扫”过方块
-PRE_GRASP_CLEAR_Z = 0.05  # 在方块顶面上方预留的间隙（米），先更高预降再抓取更稳
+# 预降间隙（当前流程默认未启用两段下探，保留作可选调参）。
+PRE_GRASP_CLEAR_Z = 0.05
 
 PLACE_H       = 0.11   # 历史：下放至桶口内再开爪；当前流程改为桶上方同 APPROACH_H 开爪，保留常量供文档/对比
 
@@ -161,7 +161,7 @@ PICK_LIFT_ASSIST_PITCH_RAD = 0.12
 # 抓取时笛卡尔目标修正（米）：MoveIt 的 ee_link/TCP 常与「两指中间平面」有偏差；若 URDF 把 TCP 放在
 # 指尖外侧，直接以方块中心为 IK 目标会表现为「伸得太外、方块在指尖/连杆下」。沿「基座→方块」
 # 方向把目标往基座收一小段，使闭合时两指中心更对准方块中心。真机可按 RViz TF 微调。
-TCP_GRASP_XY_BACKOFF_M = 0.022
+TCP_GRASP_XY_BACKOFF_M = 0.008
 
 # 抓取末端姿态（关键参数）
 # ──────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ PLACE_RESIDUAL_CLIP_M = 0.05
 # MoveIt SRDF 中的 group_state 名称（与 RViz MotionPlanning 一致，区分大小写）
 MOVEIT_ARM_HOME_STATE = "home"
 MOVEIT_GRIPPER_OPEN_STATE = "open"
-# 抓取时用 middle：完全 close 时两指贴死，无法容纳 5cm 方块且易弹飞；与实验示例一致
+# 抓取使用 middle；具体开合参数由 MoveIt 配置端维护。
 MOVEIT_GRIPPER_GRASP_STATE = "middle"
 # MoveIt OMPL：单次 plan 允许的最长时间（秒）与每次 plan() 内尝试的不同随机种子数。
 # 场景简单（2个方块+2个桶+桌面）时，5s 已经足够；过大的 planning_time 反而
@@ -212,7 +212,7 @@ MOVEIT_GRIPPER_GRASP_STATE = "middle"
 MOVEIT_PLANNING_TIME_S = 4
 MOVEIT_NUM_PLANNING_ATTEMPTS = 4
 # 默认目标容差略放宽，利于首次规划命中；精定位仍可在 _move_to_xy 的 relaxed 二次尝试中收紧/放宽
-MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.016
+MOVEIT_GOAL_POSITION_TOLERANCE_M = 0.010
 MOVEIT_GOAL_ORIENTATION_TOLERANCE_RAD = 0.15
 
 # Gazebo模型名称约定：{color}_block, {color}_bin
@@ -395,7 +395,7 @@ class SagittariusPickPlaceEnv(gym.Env):
             rospy.loginfo("[Env] MoveIt planner_id=RRTConnect")
         except Exception as e:
             rospy.logwarn("[Env] set_planner_id(RRTConnect) 未生效: %s", e)
-        self._moveit_gripper.set_goal_joint_tolerance(0.001)
+        self._moveit_gripper.set_goal_joint_tolerance(0.003)
         self._moveit_gripper.set_max_velocity_scaling_factor(0.5)
         # PlanningScene 也必须走与 MoveGroup 相同的命名空间。
         # 否则会等待根命名空间的 /get_planning_scene，出现一直 waiting。
@@ -1074,7 +1074,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         time.sleep(0.3)
 
     def _close_gripper(self):
-        """夹持方块：使用 SRDF `middle`，非 `close`（完全闭合无法容纳方块宽度）。"""
+        """夹持方块：使用 MoveIt SRDF 命名状态 middle。"""
         self._moveit_gripper.set_named_target(MOVEIT_GRIPPER_GRASP_STATE)
         self._moveit_gripper.go(wait=True)
         self._gripper_open = False
@@ -1197,9 +1197,9 @@ class SagittariusPickPlaceEnv(gym.Env):
         # 只放宽方向容差，不换姿态类型，保持末端动作一致性
         orig_pos_tol  = self._moveit_arm.get_goal_position_tolerance()
         orig_ort_tol  = self._moveit_arm.get_goal_orientation_tolerance()
-        # 二次尝试：进一步放宽，减少 TIMED_OUT（仍保持水平侧向姿态类型不变）
-        self._moveit_arm.set_goal_position_tolerance(0.020)
-        self._moveit_arm.set_goal_orientation_tolerance(0.22)
+        # 二次尝试：位置保持 1cm 精度，仅适度放宽姿态，减少首轮无解。
+        self._moveit_arm.set_goal_position_tolerance(0.010)
+        self._moveit_arm.set_goal_orientation_tolerance(0.20)
         result = _try_plan_execute(x, y, z, qx, qy, qz, qw, "relaxed_tol")
         self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
         self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
@@ -1285,7 +1285,7 @@ class SagittariusPickPlaceEnv(gym.Env):
         """
         **唯一**底层原语 `pick_and_place`：一条连续执行链，**不**拆成「先 pick 再 place」两次调用。
 
-        流程：接近方块 → 预降 → 抓取（夹爪 middle）→ **垂直抬**至 TABLE_Z+APPROACH_H(0.27m)
+        流程：接近方块 → 下探抓取（夹爪 middle）→ **垂直抬**至 TABLE_Z+APPROACH_H(0.27m)
         → **同高度**平移至桶 (place_x, place_y) → **开爪**（全程保持 middle 持块）
         → 等待物理稳定 → `_check_done()` 判定是否入桶。
 
@@ -1311,16 +1311,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             return {"pick_ok": False, "place_ok": False, "done": False}
         self._pause_robot_stage()
 
-        # 2. 预降（方块顶面上方）
-        pre_z = TABLE_Z + BLOCK_H + PRE_GRASP_CLEAR_Z
-        if not self._move_to_xy(
-            gx, gy, pre_z, yaw_block,
-            ignore_block_color=pick_color, orientation_mode="horizontal",
-        ):
-            return {"pick_ok": False, "place_ok": False, "done": False}
-        self._pause_robot_stage()
+        # 2. 下探前重定位：读取最新方块GT中心，减少偏抓（失败后下一步仍会刷新）
+        self._refresh_positions()
+        bxyz_now = self._get_pose(block_name(pick_color))
+        gx, gy = self._grasp_tcp_xy_from_block_center(float(bxyz_now[0]), float(bxyz_now[1]))
+        yaw_block = float(math.atan2(gy - ARM_BASE_Y, gx - ARM_BASE_X))
 
-        # 3. 抓取高度
+        # 3. 单层下探到抓取高度（移除 pre_grasp_down，减少一次碰撞/超时机会）
         if not self._move_to_xy(
             gx, gy, TABLE_Z + GRASP_H, yaw_block,
             ignore_block_color=pick_color, orientation_mode="horizontal",
