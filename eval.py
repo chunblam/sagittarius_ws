@@ -328,9 +328,10 @@ def plot_training_curves(log_dir: str, output_dir: str):
         ax.fill_between(xs/1000, arr.mean(0)-arr.std(0),
                         arr.mean(0)+arr.std(0), alpha=0.15, color=c)
 
-    ax.set_xlabel("训练步数（×10³）", fontsize=12)
-    ax.set_ylabel("任务成功率",       fontsize=12)
-    ax.set_title("ExploRLLM 消融实验 — Sagittarius SGR532 (VLM感知)", fontsize=13)
+    ax.set_xlabel("Training Steps (x1e3)", fontsize=12)
+    ax.set_ylabel("Task Success Rate",     fontsize=12)
+    ax.set_title("ExploRLLM Ablation - Sagittarius SGR532 (VLM Perception)",
+                 fontsize=13)
     ax.legend(fontsize=11); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(
         plt.FuncFormatter(lambda v, _: f"{v:.0%}"))

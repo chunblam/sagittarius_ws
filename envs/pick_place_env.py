@@ -1252,25 +1252,69 @@ class SagittariusPickPlaceEnv(gym.Env):
             waypoints.append(wp2)
 
             self._moveit_arm.set_start_state_to_current_state()
-            try:
-                traj, fraction = self._moveit_arm.compute_cartesian_path(
-                    waypoints,
-                    float(CARTESIAN_TRANSLATE_EEF_STEP_M),
+            eef_step = float(CARTESIAN_TRANSLATE_EEF_STEP_M)
+
+            def _plan_cartesian(wps):
+                """兼容不同 moveit_commander 签名，避免 bool 被误当 path constraints。"""
+                # 1) 先用关键字参数（新接口）
+                try:
+                    return self._moveit_arm.compute_cartesian_path(
+                        wps,
+                        eef_step,
+                        0.0,
+                        avoid_collisions=True,
+                        path_constraints=None,
+                    )
+                except TypeError:
+                    pass
+                except Exception as e:
+                    rospy.logwarn(f"[Env] 笛卡尔规划(kw)失败: {e}")
+
+                # 2) 回退到 3 参数（最兼容；avoid_collisions 走默认 True）
+                return self._moveit_arm.compute_cartesian_path(
+                    wps,
+                    eef_step,
                     0.0,
-                    True,
                 )
-            except TypeError:
-                traj, fraction = self._moveit_arm.compute_cartesian_path(
-                    waypoints,
-                    float(CARTESIAN_TRANSLATE_EEF_STEP_M),
-                    0.0,
-                )
+
+            traj, fraction = _plan_cartesian(waypoints)
 
             if float(fraction) < float(CARTESIAN_TRANSLATE_MIN_FRACTION):
                 rospy.logwarn(
                     f"[Env] 笛卡尔平移 fraction={fraction:.2f} < "
-                    f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}，放弃执行")
-                return False
+                    f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}，尝试分段平移")
+
+                # 长路径在单次 Cartesian 中常因局部不可达导致 fraction 过低；
+                # 分成 X/Y 两段提升可执行率。
+                traj1, f1 = _plan_cartesian([wp0, wp1])
+                if float(f1) < float(CARTESIAN_TRANSLATE_MIN_FRACTION):
+                    rospy.logwarn(
+                        f"[Env] 分段平移-第1段 fraction={f1:.2f} < "
+                        f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}")
+                    return False
+                ex1 = self._moveit_arm.execute(traj1, wait=True)
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+                ok1 = ex1 if isinstance(ex1, bool) else True
+                if not ok1:
+                    rospy.logwarn("[Env] 分段平移-第1段 execute 返回 False")
+                    return False
+
+                self._moveit_arm.set_start_state_to_current_state()
+                traj2, f2 = _plan_cartesian([wp1, wp2])
+                if float(f2) < float(CARTESIAN_TRANSLATE_MIN_FRACTION):
+                    rospy.logwarn(
+                        f"[Env] 分段平移-第2段 fraction={f2:.2f} < "
+                        f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}")
+                    return False
+                ex2 = self._moveit_arm.execute(traj2, wait=True)
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+                time.sleep(0.2)
+                ok2 = ex2 if isinstance(ex2, bool) else True
+                if not ok2:
+                    rospy.logwarn("[Env] 分段平移-第2段 execute 返回 False")
+                return ok2
 
             ex = self._moveit_arm.execute(traj, wait=True)
             self._moveit_arm.stop()
@@ -1459,8 +1503,15 @@ class SagittariusPickPlaceEnv(gym.Env):
         place_move_ok = self._move_xy_cartesian_fallback(
             place_x, place_y, TABLE_Z + APPROACH_H, ignore_block_color=ign)
         if not place_move_ok:
-            rospy.logwarn("[Env] 桶上方写死平移失败，放置阶段结束")
-            return {"pick_ok": True, "place_ok": False, "done": False}
+            rospy.logwarn("[Env] 桶上方写死平移失败，回退到同高度 OMPL 规划")
+            yaw_place = float(math.atan2(place_y - ARM_BASE_Y, place_x - ARM_BASE_X))
+            place_move_ok = self._move_to_xy(
+                place_x, place_y, TABLE_Z + APPROACH_H, yaw_place,
+                ignore_block_color=ign, orientation_mode="horizontal",
+            )
+            if not place_move_ok:
+                rospy.logwarn("[Env] 桶上方写死平移失败，放置阶段结束")
+                return {"pick_ok": True, "place_ok": False, "done": False}
         self._pause_robot_stage()
 
         # 桶口上方同安全高度开爪释放（middle 持块直至此处）
