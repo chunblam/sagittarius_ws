@@ -196,6 +196,10 @@ PLACE_DROP_SETTLE_S = 1.0
 # 放置平移兜底：当 OMPL 到点规划失败时，尝试固定高度的笛卡尔直线平移。
 CARTESIAN_TRANSLATE_EEF_STEP_M = 0.010
 CARTESIAN_TRANSLATE_MIN_FRACTION = 0.92
+# 粗暴平移模式：允许执行部分笛卡尔轨迹，并分段逼近目标。
+CARTESIAN_TRANSLATE_MAX_ITERS = 8
+CARTESIAN_TRANSLATE_GOAL_TOL_M = 0.012
+CARTESIAN_TRANSLATE_MIN_PROGRESS_M = 0.0
 
 # 策略网络动作向量维度（与 action_space 一致）
 ACTION_DIM = 7
@@ -1216,7 +1220,7 @@ class SagittariusPickPlaceEnv(gym.Env):
 
     def _move_xy_cartesian_fallback(self, x: float, y: float, z: float,
                                     ignore_block_color: str = None) -> bool:
-        """两点直线平移：保持当前 z 和姿态，只改 x/y 到目标桶上方。"""
+        """粗暴笛卡尔平移：关闭避碰，执行部分轨迹并循环逼近目标。"""
         if self._moveit_arm is None:
             return False
 
@@ -1226,45 +1230,63 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         try:
             ee_link = self._moveit_arm.get_end_effector_link()
-            cur = self._moveit_arm.get_current_pose(ee_link).pose
+            for i in range(int(CARTESIAN_TRANSLATE_MAX_ITERS)):
+                cur = self._moveit_arm.get_current_pose(ee_link).pose
+                rem_before = float(np.hypot(x - cur.position.x, y - cur.position.y))
+                if rem_before <= float(CARTESIAN_TRANSLATE_GOAL_TOL_M):
+                    return True
 
-            waypoints = []
+                wp = Pose()
+                wp.position.x = float(x)
+                wp.position.y = float(y)
+                wp.position.z = float(cur.position.z)
+                wp.orientation = cur.orientation
 
-            wp0 = Pose()
-            wp0.position.x = float(cur.position.x)
-            wp0.position.y = float(cur.position.y)
-            wp0.position.z = float(cur.position.z)
-            wp0.orientation = cur.orientation
-            waypoints.append(wp0)
+                self._moveit_arm.set_start_state_to_current_state()
+                traj, fraction = self._moveit_arm.compute_cartesian_path(
+                    [wp],
+                    float(CARTESIAN_TRANSLATE_EEF_STEP_M),
+                    False,
+                )
 
-            wp1 = Pose()
-            wp1.position.x = float(x)
-            wp1.position.y = float(y)
-            wp1.position.z = float(cur.position.z)
-            wp1.orientation = cur.orientation
-            waypoints.append(wp1)
+                pts = getattr(getattr(traj, "joint_trajectory", None), "points", [])
+                if float(fraction) <= 1e-3 or len(pts) == 0:
+                    rospy.logwarn(
+                        f"[Env] 笛卡尔平移无可执行轨迹 iter={i+1} fraction={fraction:.2f}")
+                    return False
 
-            self._moveit_arm.set_start_state_to_current_state()
-            traj, fraction = self._moveit_arm.compute_cartesian_path(
-                waypoints,
-                float(CARTESIAN_TRANSLATE_EEF_STEP_M),
-                True,
-            )
+                ex = self._moveit_arm.execute(traj, wait=True)
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+                time.sleep(0.15)
 
-            if float(fraction) < float(CARTESIAN_TRANSLATE_MIN_FRACTION):
-                rospy.logwarn(
-                    f"[Env] 笛卡尔平移 fraction={fraction:.2f} < "
-                    f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}，放弃执行")
-                return False
+                ok_exec = ex if isinstance(ex, bool) else True
+                if not ok_exec:
+                    rospy.logwarn(f"[Env] 笛卡尔平移 execute 返回 False iter={i+1}")
+                    return False
 
-            ex = self._moveit_arm.execute(traj, wait=True)
-            self._moveit_arm.stop()
-            self._moveit_arm.clear_pose_targets()
-            time.sleep(0.2)
-            ok_exec = ex if isinstance(ex, bool) else True
-            if not ok_exec:
-                rospy.logwarn("[Env] 笛卡尔平移 execute 返回 False")
-            return ok_exec
+                cur2 = self._moveit_arm.get_current_pose(ee_link).pose
+                rem_after = float(np.hypot(x - cur2.position.x, y - cur2.position.y))
+                progress = rem_before - rem_after
+                rospy.loginfo(
+                    f"[Env] 笛卡尔平移 iter={i+1} fraction={fraction:.2f} "
+                    f"rem={rem_after:.4f} progress={progress:.4f}")
+
+                if rem_after <= float(CARTESIAN_TRANSLATE_GOAL_TOL_M):
+                    return True
+                if progress < float(CARTESIAN_TRANSLATE_MIN_PROGRESS_M):
+                    rospy.logwarn(
+                        f"[Env] 笛卡尔平移进展过小 iter={i+1} progress={progress:.4f}")
+                    return False
+
+            cur_end = self._moveit_arm.get_current_pose(ee_link).pose
+            rem_end = float(np.hypot(x - cur_end.position.x, y - cur_end.position.y))
+            if rem_end <= float(CARTESIAN_TRANSLATE_GOAL_TOL_M):
+                return True
+            rospy.logwarn(
+                f"[Env] 笛卡尔平移达到最大迭代 {CARTESIAN_TRANSLATE_MAX_ITERS}，"
+                f"remaining={rem_end:.4f}")
+            return False
         except Exception as e:
             rospy.logwarn(f"[Env] 笛卡尔平移兜底失败: {e}")
             try:
