@@ -193,6 +193,10 @@ INTER_ROBOT_STAGE_PAUSE_S = 0.5
 # 桶口上方开爪后，等待方块落入桶内再 _check_done（Gazebo 物理）
 PLACE_DROP_SETTLE_S = 1.0
 
+# 放置平移兜底：当 OMPL 到点规划失败时，尝试固定高度的笛卡尔直线平移。
+CARTESIAN_TRANSLATE_EEF_STEP_M = 0.010
+CARTESIAN_TRANSLATE_MIN_FRACTION = 0.92
+
 # 策略网络动作向量维度（与 action_space 一致）
 ACTION_DIM = 7
 # 残差裁剪：抓取阶段收紧到 ±2cm 提升命中率；放置保持 ±5cm 兼顾策略探索。
@@ -1210,6 +1214,81 @@ class SagittariusPickPlaceEnv(gym.Env):
                 f"pos=({x:.3f},{y:.3f},{z:.3f}) mode={orientation_mode}")
         return result
 
+    def _move_xy_cartesian_fallback(self, x: float, y: float, z: float,
+                                    ignore_block_color: str = None) -> bool:
+        """固定姿态/固定高度的笛卡尔平移兜底（优先用于持块搬运到桶上方）。"""
+        if self._moveit_arm is None:
+            return False
+
+        self._sync_moveit_planning_scene(ignore_block_color=ignore_block_color)
+        if ignore_block_color:
+            self._try_allow_held_block_vs_bins_planning(ignore_block_color)
+
+        try:
+            ee_link = self._moveit_arm.get_end_effector_link()
+            cur = self._moveit_arm.get_current_pose(ee_link).pose
+
+            waypoints = []
+
+            wp0 = Pose()
+            wp0.position.x = float(cur.position.x)
+            wp0.position.y = float(cur.position.y)
+            wp0.position.z = float(z)
+            wp0.orientation = cur.orientation
+            waypoints.append(wp0)
+
+            wp1 = Pose()
+            wp1.position.x = float(x)
+            wp1.position.y = float(cur.position.y)
+            wp1.position.z = float(z)
+            wp1.orientation = cur.orientation
+            waypoints.append(wp1)
+
+            wp2 = Pose()
+            wp2.position.x = float(x)
+            wp2.position.y = float(y)
+            wp2.position.z = float(z)
+            wp2.orientation = cur.orientation
+            waypoints.append(wp2)
+
+            self._moveit_arm.set_start_state_to_current_state()
+            try:
+                traj, fraction = self._moveit_arm.compute_cartesian_path(
+                    waypoints,
+                    float(CARTESIAN_TRANSLATE_EEF_STEP_M),
+                    0.0,
+                    True,
+                )
+            except TypeError:
+                traj, fraction = self._moveit_arm.compute_cartesian_path(
+                    waypoints,
+                    float(CARTESIAN_TRANSLATE_EEF_STEP_M),
+                    0.0,
+                )
+
+            if float(fraction) < float(CARTESIAN_TRANSLATE_MIN_FRACTION):
+                rospy.logwarn(
+                    f"[Env] 笛卡尔平移 fraction={fraction:.2f} < "
+                    f"{CARTESIAN_TRANSLATE_MIN_FRACTION:.2f}，放弃执行")
+                return False
+
+            ex = self._moveit_arm.execute(traj, wait=True)
+            self._moveit_arm.stop()
+            self._moveit_arm.clear_pose_targets()
+            time.sleep(0.2)
+            ok_exec = ex if isinstance(ex, bool) else True
+            if not ok_exec:
+                rospy.logwarn("[Env] 笛卡尔平移 execute 返回 False")
+            return ok_exec
+        except Exception as e:
+            rospy.logwarn(f"[Env] 笛卡尔平移兜底失败: {e}")
+            try:
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+            except Exception:
+                pass
+            return False
+
     def _try_allow_held_block_vs_bins_planning(self, held_color: str) -> None:
         """持块侧向接近桶时，附着方块盒与桶盒可能被判重叠；若 moveit_commander 支持则开放碰撞对。"""
         if self._planning_scene is None or not held_color:
@@ -1288,6 +1367,9 @@ class SagittariusPickPlaceEnv(gym.Env):
         流程：接近方块 → 下探抓取（夹爪 middle）→ **垂直抬**至 TABLE_Z+APPROACH_H(0.27m)
         → **同高度**平移至桶 (place_x, place_y) → **开爪**（全程保持 middle 持块）
         → 等待物理稳定 → `_check_done()` 判定是否入桶。
+
+        说明：抬起后到桶上方的移动使用固定笛卡尔平移（写死逻辑），不再调用 `_move_to_xy`
+        的 OMPL 到点规划，以降低采样超时概率。
 
         不在 PlanningScene 中 attach 方块；搬运段用 ignore_block_color 省略桌面方块碰撞体。
 
@@ -1371,13 +1453,13 @@ class SagittariusPickPlaceEnv(gym.Env):
             pass
         self._pause_robot_stage()
 
-        yaw_bin = float(math.atan2(place_y - ARM_BASE_Y, place_x - ARM_BASE_X))
         ign = pick_color
 
-        if not self._move_to_xy(
-            place_x, place_y, TABLE_Z + APPROACH_H, yaw_bin,
-            orientation_mode="horizontal", ignore_block_color=ign,
-        ):
+        # 按固定高度写死平移：抬起后不再做 OMPL 到点规划，直接做笛卡尔直线平移到桶上方。
+        place_move_ok = self._move_xy_cartesian_fallback(
+            place_x, place_y, TABLE_Z + APPROACH_H, ignore_block_color=ign)
+        if not place_move_ok:
+            rospy.logwarn("[Env] 桶上方写死平移失败，放置阶段结束")
             return {"pick_ok": True, "place_ok": False, "done": False}
         self._pause_robot_stage()
 
