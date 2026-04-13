@@ -197,9 +197,9 @@ PLACE_DROP_SETTLE_S = 1.0
 CARTESIAN_TRANSLATE_EEF_STEP_M = 0.010
 CARTESIAN_TRANSLATE_MIN_FRACTION = 0.92
 # 粗暴平移模式：允许执行部分笛卡尔轨迹，并分段逼近目标。
-CARTESIAN_TRANSLATE_MAX_ITERS = 8
-CARTESIAN_TRANSLATE_GOAL_TOL_M = 0.012
-CARTESIAN_TRANSLATE_MIN_PROGRESS_M = 0.0
+CARTESIAN_TRANSLATE_SEGMENT_M = 0.040
+CARTESIAN_TRANSLATE_MAX_ITERS = 15
+CARTESIAN_TRANSLATE_GOAL_TOL_M = 0.020
 
 # 策略网络动作向量维度（与 action_space 一致）
 ACTION_DIM = 7
@@ -1230,15 +1230,59 @@ class SagittariusPickPlaceEnv(gym.Env):
 
         try:
             ee_link = self._moveit_arm.get_end_effector_link()
+
+            def _micro_pose_push(tx: float, ty: float, tz: float, q, idx: int) -> bool:
+                """笛卡尔段无轨迹时，直接以同高度位姿做一次短程 OMPL 推进。"""
+                target = PoseStamped()
+                target.header.frame_id = "world"
+                target.pose.position.x = float(tx)
+                target.pose.position.y = float(ty)
+                target.pose.position.z = float(tz)
+                target.pose.orientation = q
+
+                orig_pos_tol = self._moveit_arm.get_goal_position_tolerance()
+                orig_ort_tol = self._moveit_arm.get_goal_orientation_tolerance()
+                self._moveit_arm.set_goal_position_tolerance(0.030)
+                self._moveit_arm.set_goal_orientation_tolerance(0.45)
+                self._moveit_arm.clear_pose_targets()
+                self._moveit_arm.set_start_state_to_current_state()
+                self._moveit_arm.set_pose_target(target, ee_link)
+                plan_ok, traj, plan_time, err = self._moveit_arm.plan()
+                if not plan_ok:
+                    rospy.logwarn(
+                        f"[Env] 平移微段位姿规划失败 iter={idx} "
+                        f"pos=({tx:.3f},{ty:.3f},{tz:.3f}) time={plan_time:.2f}s err={err}")
+                    self._moveit_arm.clear_pose_targets()
+                    self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
+                    self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
+                    return False
+
+                ex = self._moveit_arm.execute(traj, wait=True)
+                self._moveit_arm.stop()
+                self._moveit_arm.clear_pose_targets()
+                self._moveit_arm.set_goal_position_tolerance(orig_pos_tol)
+                self._moveit_arm.set_goal_orientation_tolerance(orig_ort_tol)
+                time.sleep(0.15)
+                ok_exec = ex if isinstance(ex, bool) else True
+                if not ok_exec:
+                    rospy.logwarn(f"[Env] 平移微段位姿执行失败 iter={idx}")
+                return ok_exec
+
             for i in range(int(CARTESIAN_TRANSLATE_MAX_ITERS)):
                 cur = self._moveit_arm.get_current_pose(ee_link).pose
                 rem_before = float(np.hypot(x - cur.position.x, y - cur.position.y))
                 if rem_before <= float(CARTESIAN_TRANSLATE_GOAL_TOL_M):
                     return True
 
+                dx = float(x - cur.position.x)
+                dy = float(y - cur.position.y)
+                step_len = float(min(CARTESIAN_TRANSLATE_SEGMENT_M, rem_before))
+                tx = float(cur.position.x + dx / rem_before * step_len)
+                ty = float(cur.position.y + dy / rem_before * step_len)
+
                 wp = Pose()
-                wp.position.x = float(x)
-                wp.position.y = float(y)
+                wp.position.x = tx
+                wp.position.y = ty
                 wp.position.z = float(cur.position.z)
                 wp.orientation = cur.orientation
 
@@ -1252,18 +1296,20 @@ class SagittariusPickPlaceEnv(gym.Env):
                 pts = getattr(getattr(traj, "joint_trajectory", None), "points", [])
                 if float(fraction) <= 1e-3 or len(pts) == 0:
                     rospy.logwarn(
-                        f"[Env] 笛卡尔平移无可执行轨迹 iter={i+1} fraction={fraction:.2f}")
-                    return False
+                        f"[Env] 笛卡尔平移无可执行轨迹 iter={i+1} fraction={fraction:.2f}，"
+                        f"改用位姿微段推进")
+                    if not _micro_pose_push(tx, ty, float(cur.position.z), cur.orientation, i + 1):
+                        return False
+                else:
+                    ex = self._moveit_arm.execute(traj, wait=True)
+                    self._moveit_arm.stop()
+                    self._moveit_arm.clear_pose_targets()
+                    time.sleep(0.15)
 
-                ex = self._moveit_arm.execute(traj, wait=True)
-                self._moveit_arm.stop()
-                self._moveit_arm.clear_pose_targets()
-                time.sleep(0.15)
-
-                ok_exec = ex if isinstance(ex, bool) else True
-                if not ok_exec:
-                    rospy.logwarn(f"[Env] 笛卡尔平移 execute 返回 False iter={i+1}")
-                    return False
+                    ok_exec = ex if isinstance(ex, bool) else True
+                    if not ok_exec:
+                        rospy.logwarn(f"[Env] 笛卡尔平移 execute 返回 False iter={i+1}")
+                        return False
 
                 cur2 = self._moveit_arm.get_current_pose(ee_link).pose
                 rem_after = float(np.hypot(x - cur2.position.x, y - cur2.position.y))
@@ -1274,10 +1320,6 @@ class SagittariusPickPlaceEnv(gym.Env):
 
                 if rem_after <= float(CARTESIAN_TRANSLATE_GOAL_TOL_M):
                     return True
-                if progress < float(CARTESIAN_TRANSLATE_MIN_PROGRESS_M):
-                    rospy.logwarn(
-                        f"[Env] 笛卡尔平移进展过小 iter={i+1} progress={progress:.4f}")
-                    return False
 
             cur_end = self._moveit_arm.get_current_pose(ee_link).pose
             rem_end = float(np.hypot(x - cur_end.position.x, y - cur_end.position.y))
